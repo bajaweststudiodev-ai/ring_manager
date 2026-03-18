@@ -8,14 +8,15 @@ import { addFighterFull, db } from '../db/db';
 export function RegisterFighter() {
   const [step, setStep] = useState(1);
   const [matriculaGenerada, setMatriculaGenerada] = useState(null);
-
+// --- NUEVO ESTADO PARA LAS COLONIAS ---
+  const [coloniasDisponibles, setColoniasDisponibles] = useState([]);
   const webcamRef = useRef(null);
   const sigPad = useRef(null);
 
   const [formData, setFormData] = useState({
     // Personales
-    nombres: '', apellidos: '', fechaNacimiento: '', 
-    direccion: '', numeroCasa: '', codigoPostal: '', ciudad: '', 
+nombres: '', apellidos: '', fechaNacimiento: '', 
+    direccion: '', numeroCasa: '', colonia: '', codigoPostal: '', ciudad: '', 
     telefono: '', email: '', emergNombre: '', emergTelefono: '',
     // Tutor (Para menores)
     tutorNombre: '', tutorTelefono: '', tutorCorreo: '', tutorFechaNacimiento: '',
@@ -27,9 +28,58 @@ export function RegisterFighter() {
     aceptoTerminos: false
   });
 
-  const handleChange = (e) => {
+  
+
+// --- HANDLE CHANGE CON CANDADOS Y AUTOMATIZACIÓN ---
+  const handleChange = async (e) => {
     const { name, value } = e.target;
+    
+    // CANDADO 1: Teléfonos de exactamente 10 dígitos (ni más ni menos, solo números)
+    if ((name === 'telefono' || name === 'emergTelefono' || name === 'tutorTelefono')) {
+      const soloNumeros = value.replace(/\D/g, ''); // Borra cualquier letra o símbolo
+      if (soloNumeros.length > 10) return; // Topa en 10
+      setFormData(prev => ({ ...prev, [name]: soloNumeros }));
+      return;
+    }
+
+    // Actualización normal (todo a mayúsculas)
     setFormData(prev => ({ ...prev, [name]: value.toUpperCase() }));
+
+  // AUTOMATIZACIÓN: Si el campo es Código Postal y tiene 5 dígitos
+    if (name === 'codigoPostal' && value.length === 5) {
+      try {
+        const response = await fetch(`https://api.zippopotam.us/mx/${value}`);
+        if (response.ok) {
+          const data = await response.json();
+          const listaColonias = data.places.map(place => place['place name'].toUpperCase());
+          
+          // --- INTELIGENCIA DE CIUDADES ---
+          let ciudadDetectada = "";
+          if (value.startsWith('228') || value.startsWith('227')) {
+            ciudadDetectada = "ENSENADA";
+          } else if (value.startsWith('22') && !value.startsWith('228') && !value.startsWith('227')) {
+            ciudadDetectada = "TIJUANA / ROSARITO"; // 22000 a 22699
+          } else if (value.startsWith('21')) {
+            ciudadDetectada = "MEXICALI / TECATE"; // 21000 a 21999
+          } else {
+            // Si viene de otro estado, le ponemos el nombre del Estado como respaldo
+            ciudadDetectada = data.places[0]['state'].toUpperCase(); 
+          }
+          
+          setColoniasDisponibles(listaColonias);
+          
+          setFormData(prev => ({ 
+            ...prev, 
+            codigoPostal: value,
+            ciudad: ciudadDetectada,
+            colonia: listaColonias.length > 0 ? listaColonias[0] : ''
+          }));
+        }
+      } catch (error) {
+        console.warn("No se pudo autocompletar el CP", error);
+        setColoniasDisponibles([]); 
+      }
+    }
   };
 
   // --- LÓGICA DE EDAD (MENOR DE EDAD) ---
@@ -223,15 +273,39 @@ export function RegisterFighter() {
       <div style={gridResponsive}>
         <Input label="NOMBRES *" name="nombres" val={formData.nombres} onChange={handleChange} />
         <Input label="APELLIDOS *" name="apellidos" val={formData.apellidos} onChange={handleChange} />
-        <Input label="FECHA DE NACIMIENTO *" name="fechaNacimiento" type="date" val={formData.fechaNacimiento} onChange={handleChange} />
+        {/* Usamos max={hoy} para que el calendario no deje elegir fechas futuras */}
+        <Input 
+          label="FECHA DE NACIMIENTO *" 
+          name="fechaNacimiento" 
+          type="date" 
+          val={formData.fechaNacimiento} 
+          onChange={handleChange} 
+          max={new Date().toISOString().split('T')[0]} 
+        />
         <Input label="TELÉFONO MÓVIL *" name="telefono" type="number" val={formData.telefono} onChange={handleChange} ph="10 dígitos" />
       </div>
-      <h4 style={sectionSubtitleStyle}>DOMICILIO</h4>
+<h4 style={sectionSubtitleStyle}>DOMICILIO</h4>
       <div style={gridResponsive}>
-        <Input label="CALLE / AVENIDA *" name="direccion" val={formData.direccion} onChange={handleChange} />
-        <Input label="NÚMERO *" name="numeroCasa" val={formData.numeroCasa} onChange={handleChange} />
+<Input label="C.P. *" name="codigoPostal" type="number" val={formData.codigoPostal} onChange={handleChange} ph="Ej. 22800" />
+        
+        {/* COLONIA: Se vuelve lista desplegable si la API la encuentra */}
+        <div>
+          <label style={labelStyle}>COLONIA / FRACC. *</label>
+          {coloniasDisponibles.length > 0 ? (
+            <select name="colonia" value={formData.colonia} onChange={handleChange} style={inputStyle}>
+              {coloniasDisponibles.map((col, i) => <option key={i} value={col}>{col}</option>)}
+            </select>
+          ) : (
+            <input name="colonia" value={formData.colonia} onChange={handleChange} style={inputStyle} placeholder="Escribe tu colonia..." />
+          )}
+        </div>
+      </div>
+      
+      {/* SEPARADOS: Calle, Número y Ciudad */}
+      <div style={{ ...gridResponsive, gridTemplateColumns: '2fr 1fr 1fr' }}>
+        <Input label="CALLE / AVENIDA *" name="direccion" val={formData.direccion} onChange={handleChange} ph="Ej. Av. Reforma" />
+        <Input label="NÚMERO *" name="numeroCasa" val={formData.numeroCasa} onChange={handleChange} ph="Ej. 123" />
         <Input label="CIUDAD *" name="ciudad" val={formData.ciudad} onChange={handleChange} />
-        <Input label="C.P. *" name="codigoPostal" type="number" val={formData.codigoPostal} onChange={handleChange} />
       </div>
       <div style={gridResponsive}>
         <Input label="CORREO ELECTRÓNICO" name="email" type="email" val={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value.toLowerCase()})} />

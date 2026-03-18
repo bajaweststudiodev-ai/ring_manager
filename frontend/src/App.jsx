@@ -6,11 +6,12 @@ import { AttendanceLog } from './components/AttendanceLog';
 import { Dashboard } from './components/Dashboard'; // 👇 NUEVO
 
 function App() {
-  const [activePage, setActivePage] = useState('dashboard');
-  
-  // 1. NUEVO ESTADO: Controla si el menú está abierto o cerrado
+// REEMPLAZA TUS ESTADOS INICIALES POR ESTOS:
+  const [activePage, setActivePage] = useState('checkin'); // Por defecto arranca en el escáner
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-
+  
+  // NUEVO: Controla si el dueño desbloqueó el sistema
+  const [isAdmin, setIsAdmin] = useState(false);
   // 2. ESTILOS DINÁMICOS: El ancho cambia dependiendo del estado
   const sidebarWidth = isSidebarOpen ? '250px' : '75px';
 
@@ -33,6 +34,22 @@ function App() {
     gap: isSidebarOpen ? '15px' : '0'
   });
 
+
+  // Función para pedir el PIN
+  const handleAdminToggle = () => {
+    if (isAdmin) {
+      setIsAdmin(false);
+      setActivePage('checkin'); // Si se bloquea, lo manda al escáner por seguridad
+    } else {
+      const pin = prompt("Ingresa el PIN de Administrador:");
+      if (pin === "2600") { // 👈 AQUÍ PONES EL PIN QUE QUIERAS
+        setIsAdmin(true);
+        setActivePage('dashboard'); // Al desbloquear, lo manda al resumen
+      } else if (pin !== null) {
+        alert("❌ PIN INCORRECTO");
+      }
+    }
+  };
   return (
     <div style={{ display: 'flex', height: '100vh', backgroundColor: '#fafafa', fontFamily: 'sans-serif', overflow: 'hidden' }}>
       
@@ -80,14 +97,7 @@ function App() {
           )}
         </div>
         
-        {/* BOTONES DE NAVEGACIÓN */}
-        {/* Usamos el atributo "title" para que al pasar el mouse por el icono cerrado, diga para qué sirve */}
-        {/* 👇 NUEVO BOTÓN DE INICIO 👇 */}
-        <button onClick={() => setActivePage('dashboard')} style={navBtnStyle('dashboard')} title="Panel Central">
-          <span>📊</span> {isSidebarOpen && <span>Inicio</span>}
-        </button>
-        
-        {/* TUS OTROS BOTONES (Control de acceso, Registro, etc...) */}
+        {/* BOTONES PÚBLICOS (STAFF) */}
         <button onClick={() => setActivePage('checkin')} style={navBtnStyle('checkin')} title="Control de Acceso">
           <span>📷</span> {isSidebarOpen && <span>Acceso</span>}
         </button>
@@ -95,16 +105,31 @@ function App() {
         <button onClick={() => setActivePage('register')} style={navBtnStyle('register')} title="Nuevo Registro">
           <span>➕</span> {isSidebarOpen && <span>Registro</span>}
         </button>
-        
-        <button onClick={() => setActivePage('members')} style={navBtnStyle('members')} title="Miembros y Pagos">
-          <span>👥</span> {isSidebarOpen && <span>Miembros</span>}
-        </button>
-        
-        {/* 👇 NUEVO BOTÓN 👇 */}
-        <button onClick={() => setActivePage('attendance')} style={navBtnStyle('attendance')} title="Asistencias de Hoy">
-          <span>📅</span> {isSidebarOpen && <span>Asistencias</span>}
-        </button>
 
+        {/* BOTONES PRIVADOS (SOLO ADMIN) */}
+        {isAdmin && (
+          <>
+            <button onClick={() => setActivePage('dashboard')} style={navBtnStyle('dashboard')} title="Panel Central">
+              <span>📊</span> {isSidebarOpen && <span>Inicio</span>}
+            </button>
+            <button onClick={() => setActivePage('members')} style={navBtnStyle('members')} title="Miembros y Pagos">
+              <span>👥</span> {isSidebarOpen && <span>Miembros</span>}
+            </button>
+            <button onClick={() => setActivePage('attendance')} style={navBtnStyle('attendance')} title="Asistencias de Hoy">
+              <span>📅</span> {isSidebarOpen && <span>Asistencias</span>}
+            </button>
+          </>
+        )}
+{/* EL BOTÓN DE CANDADO (DISCRETO HASTA ABAJO) */}
+        <div style={{ marginTop: 'auto', paddingTop: '20px', borderTop: '1px solid #eee' }}>
+          <button 
+            onClick={handleAdminToggle} 
+            style={{...navBtnStyle('admin'), color: isAdmin ? '#dc3545' : '#ccc', backgroundColor: 'transparent'}}
+            title={isAdmin ? "Bloquear Sistema" : "Desbloquear Admin"}
+          >
+            <span>{isAdmin ? '🔓' : '🔒'}</span> {isSidebarOpen && <span>{isAdmin ? 'Cerrar Admin' : 'Admin'}</span>}
+          </button>
+        </div>
       </div>
 
     {/* CONTENIDO PRINCIPAL */}
