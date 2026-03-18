@@ -1,0 +1,25 @@
+/* Quita los botones y textos feos de la librería QR */
+#reader__dashboard_section_csr button, 
+#reader__dashboard_section_fsr, 
+#reader img[alt="Info icon"],
+#reader span {
+    display: none !important;
+}
+
+/* Limpia cualquier basura visual de la cámara */
+#reader__status_span, 
+#reader__dashboard_section_csr,
+#reader img {
+    display: none !important;
+}
+
+#reader video {
+    object-fit: cover !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+/* Estiliza el borde del escáner */
+#reader {
+    border: 1px solid #000 !important; /* El borde negro fino que pediste */
+    background-color: #000;
+}
