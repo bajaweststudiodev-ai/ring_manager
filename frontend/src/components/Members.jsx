@@ -1,12 +1,53 @@
 import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, addPayment } from '../db/db';
-
+// Agrega esta línea debajo de tus otros imports
+import { checkAccess } from '../logic/rules';
 export function Members() {
   const [searchTerm, setSearchTerm] = useState('');
+// --- NUEVO: ESTADOS PARA EDICIÓN ---
+  const [editingId, setEditingId] = useState(null);
+  const [editData, setEditData] = useState({ nombres: '', apellidos: '', telefono: '' });
 
+  // Función para abrir la ventanita con los datos precargados
+  const handleEditClick = (fighter) => {
+    setEditingId(fighter.id);
+    setEditData({
+      nombres: fighter.nombres || '',
+      apellidos: fighter.apellidos || '',
+      telefono: fighter.telefono || ''
+    });
+  };
+
+  // Función para guardar los cambios en Dexie
+  const handleGuardarEdicion = async () => {
+    try {
+      await db.fighters.update(editingId, {
+        nombres: editData.nombres,
+        apellidos: editData.apellidos,
+        telefono: editData.telefono,
+        // Actualizamos el nombre completo para que el buscador siga funcionando
+        name: `${editData.nombres} ${editData.apellidos}`.trim()
+      });
+      alert("✅ DATOS ACTUALIZADOS CORRECTAMENTE");
+      setEditingId(null); // Cerramos la ventana
+    } catch (error) {
+      console.error(error);
+      alert("❌ ERROR AL ACTUALIZAR");
+    }
+  };
   // Traemos a todos los peleadores
-  const fighters = useLiveQuery(() => db.fighters.toArray());
+  // REEMPLAZA TU useLiveQuery POR ESTO:
+  const fighters = useLiveQuery(async () => {
+    const allFighters = await db.fighters.toArray();
+    
+    // Mapeamos cada peleador para adjuntarle su estado de pago actual
+    return Promise.all(allFighters.map(async (fighter) => {
+      const lastPayment = await db.payments.where('fighter_id').equals(fighter.id).last();
+      const access = checkAccess(lastPayment);
+      return { ...fighter, statusAccess: access }; // Combinamos los datos
+    }));
+  });
 
   const handlePayMonth = async (fighterId, name) => {
     const confirmacion = window.confirm(`¿Registrar mensualidad para ${name}?`);
@@ -86,23 +127,41 @@ export function Members() {
                 </div>
               </div>
 
-              {/* COLUMNA 2: ESTADO (Placeholder para lógica de vigencia) */}
-              <div style={{ fontSize: '0.8rem', color: '#888', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                {/* En la siguiente fase, aquí calcularemos VIGENTE (Verde) / VENCIDO (Gris) */}
-                --
+              {/* REEMPLAZA EL "--" DENTRO DE LA COLUMNA 2 POR ESTO: */}
+              <div style={{ fontSize: '0.75rem', fontWeight: '900', letterSpacing: '0.5px' }}>
+                {fighter.statusAccess?.canEnter ? (
+                  <span style={{ color: '#155724', backgroundColor: '#d4edda', padding: '6px 12px', borderRadius: '50px' }}>
+                    🟢 VIGENTE
+                  </span>
+                ) : (
+                  <span style={{ color: '#721c24', backgroundColor: '#f8d7da', padding: '6px 12px', borderRadius: '50px' }}>
+                    🔴 VENCIDO
+                  </span>
+                )}
               </div>
 
               {/* COLUMNA 3: ACCIONES */}
-              <div style={{ textAlign: 'right' }}>
+             {/* COLUMNA 3: ACCIONES */}
+              <div style={{ textAlign: 'right', display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button 
+                  onClick={() => handleEditClick(fighter)}
+                  style={{ 
+                    padding: '8px 12px', backgroundColor: '#1F2A44', color: '#ffffff', 
+                    border: 'none', borderRadius: '4px', cursor: 'pointer', 
+                    fontSize: '0.7rem', fontWeight: '900', textTransform: 'uppercase'
+                  }}
+                >
+                  ✏️ Editar
+                </button>
                 <button 
                   onClick={() => handlePayMonth(fighter.id, fighter.name)}
                   style={{ 
-                    padding: '10px 20px', backgroundColor: '#FF7F27', color: '#000000', 
+                    padding: '8px 12px', backgroundColor: '#FF7F27', color: '#ffffff', 
                     border: 'none', borderRadius: '4px', cursor: 'pointer', 
-                    fontSize: '0.7rem', fontWeight: '900', letterSpacing: '0.5px', textTransform: 'uppercase'
+                    fontSize: '0.7rem', fontWeight: '900', textTransform: 'uppercase'
                   }}
                 >
-                   Renovar Mes
+                  ➕ Renovar
                 </button>
               </div>
 
@@ -117,6 +176,40 @@ export function Members() {
         </div>
 
       </div>
+      {/* --- MODAL FLOTANTE DE EDICIÓN --- */}
+        {editingId && (
+          <div style={{
+            position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh',
+            backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000
+          }}>
+            <div style={{ backgroundColor: '#fff', padding: '30px', borderRadius: '12px', width: '400px', boxShadow: '0 10px 25px rgba(0,0,0,0.2)' }}>
+              <h3 style={{ marginTop: 0, color: '#1F2A44', borderBottom: '2px solid #FF7F27', paddingBottom: '10px' }}>✏️ EDITAR ALUMNO</h3>
+              
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 'bold', marginBottom: '5px' }}>NOMBRES</label>
+              <input 
+                style={{ width: '100%', padding: '10px', marginBottom: '15px', border: '1px solid #ddd', borderRadius: '6px', boxSizing: 'border-box' }}
+                value={editData.nombres} onChange={e => setEditData({...editData, nombres: e.target.value.toUpperCase()})}
+              />
+
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 'bold', marginBottom: '5px' }}>APELLIDOS</label>
+              <input 
+                style={{ width: '100%', padding: '10px', marginBottom: '15px', border: '1px solid #ddd', borderRadius: '6px', boxSizing: 'border-box' }}
+                value={editData.apellidos} onChange={e => setEditData({...editData, apellidos: e.target.value.toUpperCase()})}
+              />
+
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 'bold', marginBottom: '5px' }}>TELÉFONO</label>
+              <input 
+                type="number" style={{ width: '100%', padding: '10px', marginBottom: '25px', border: '1px solid #ddd', borderRadius: '6px', boxSizing: 'border-box' }}
+                value={editData.telefono} onChange={e => setEditData({...editData, telefono: e.target.value})}
+              />
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '15px' }}>
+                <button onClick={() => setEditingId(null)} style={{ flex: 1, padding: '10px', backgroundColor: '#eee', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>CANCELAR</button>
+                <button onClick={handleGuardarEdicion} style={{ flex: 1, padding: '10px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>✅ GUARDAR</button>
+              </div>
+            </div>
+          </div>
+        )}
     </div>
   );
 }

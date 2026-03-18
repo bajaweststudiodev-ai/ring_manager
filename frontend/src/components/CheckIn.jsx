@@ -68,9 +68,17 @@ export function CheckIn() {
       const result = checkAccess(lastPayment);
 
       if (result.canEnter) {
-        // El audio fallará si no hay interacción previa, pero no romperá la app
         new Audio('/beep-success.mp3').play().catch(() => {});
         setStatus({ bg: '#f0fff4', border: '#28a745', msg: 'AUTORIZADO', fighter });
+
+        // 👇 NUEVO: Registramos la asistencia silenciosamente en Dexie 👇
+        db.attendance.add({
+          fighter_id: fighter.id,
+          date: new Date().toISOString(), // Guarda la fecha y hora exacta
+          synced: 0 // Bandera para cuando lo subamos a la nube de Vercel/Flask
+        }).catch(err => console.error("Error guardando asistencia:", err));
+        // 👆 FIN DE LO NUEVO 👆
+
       } else {
         setStatus({ bg: '#fff5f5', border: '#dc3545', msg: result.reason.toUpperCase(), fighter });
       }
