@@ -1,214 +1,317 @@
-import React, { useState, useRef, useCallback, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import SignatureCanvas from 'react-signature-canvas';
 import jsPDF from 'jspdf';
-import { QRCodeSVG } from 'qrcode.react';
-import { addFighterFull, db } from '../db/db';
+import { FiMapPin, FiSmartphone } from 'react-icons/fi';
+import { fetchApi } from '../config/api';
+import { getFighterDisplayName, normalizeFighterRecord } from '../db/db';
 
-export function RegisterFighter() {
+export function RegisterFighter({ gymContext = null, publicMode = false }) {
   const [step, setStep] = useState(1);
   const [matriculaGenerada, setMatriculaGenerada] = useState(null);
-// --- NUEVO ESTADO PARA LAS COLONIAS ---
   const [coloniasDisponibles, setColoniasDisponibles] = useState([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [serverMessage, setServerMessage] = useState('');
   const webcamRef = useRef(null);
   const sigPad = useRef(null);
 
   const [formData, setFormData] = useState({
-    // Personales
-nombres: '', apellidos: '', fechaNacimiento: '', 
-    direccion: '', numeroCasa: '', colonia: '', codigoPostal: '', ciudad: '', 
-    telefono: '', email: '', emergNombre: '', emergTelefono: '',
-    // Tutor (Para menores)
-    tutorNombre: '', tutorTelefono: '', tutorCorreo: '', tutorFechaNacimiento: '',
-    // Médico
-    sistemaSalud: 'NO TENGO', consultorio: '', alergias: '', 
-    padecimientos: '', tratamientos: '', grupoSanguineo: 'NO SABE',
-    // Membresía
-    tipoMembresia: 'MENSUALIDAD', firmaDigital: null, fotoPerfil: null,
+    nombres: '',
+    apellidoPaterno: '',
+    apellidoMaterno: '',
+    fechaNacimiento: '',
+    direccion: '',
+    numeroCasa: '',
+    colonia: '',
+    codigoPostal: '',
+    ciudad: '',
+    telefono: '',
+    email: '',
+    emergNombre: '',
+    emergTelefono: '',
+    tutorNombres: '',
+    tutorApellidoPaterno: '',
+    tutorApellidoMaterno: '',
+    tutorTelefono: '',
+    tutorCorreo: '',
+    tutorFechaNacimiento: '',
+    sistemaSalud: 'NO TENGO',
+    consultorio: '',
+    alergias: '',
+    lesiones: '',
+    tratamientos: '',
+    grupoSanguineo: 'NO SABE',
+    tipoMembresia: 'MENSUALIDAD + INSCRIPCION',
+    fotoPerfil: null,
     aceptoTerminos: false
   });
 
-  
-
-// --- HANDLE CHANGE CON CANDADOS Y AUTOMATIZACIÓN ---
-  const handleChange = async (e) => {
-    const { name, value } = e.target;
-    
-    // CANDADO 1: Teléfonos de exactamente 10 dígitos (ni más ni menos, solo números)
-    if ((name === 'telefono' || name === 'emergTelefono' || name === 'tutorTelefono')) {
-      const soloNumeros = value.replace(/\D/g, ''); // Borra cualquier letra o símbolo
-      if (soloNumeros.length > 10) return; // Topa en 10
-      setFormData(prev => ({ ...prev, [name]: soloNumeros }));
+  useEffect(() => {
+    if (!publicMode) {
+      document.title = "Ring Manager";
       return;
     }
 
-    // Actualización normal (todo a mayúsculas)
-    setFormData(prev => ({ ...prev, [name]: value.toUpperCase() }));
+    const gymName = gymContext?.nombre?.trim();
+    document.title = gymName ? `Registro | ${gymName}` : 'Registro publico';
+  }, [gymContext, publicMode]);
 
-  // AUTOMATIZACIÓN: Si el campo es Código Postal y tiene 5 dígitos
+  const generarMatriculaUnica = () => {
+    const randomHex = Math.random().toString(16).substring(2, 6).toUpperCase();
+    const tiempo = Date.now().toString().slice(-3);
+    return `CT-${randomHex}-${tiempo}`;
+  };
+
+  const handleChange = async (e) => {
+    const { name, value } = e.target;
+
+    if (name === 'telefono' || name === 'emergTelefono' || name === 'tutorTelefono') {
+      const soloNumeros = value.replace(/\D/g, '');
+      if (soloNumeros.length > 10) return;
+      setFormData((prev) => ({ ...prev, [name]: soloNumeros }));
+      return;
+    }
+
+    if (name === 'email' || name === 'tutorCorreo') {
+      setFormData((prev) => ({ ...prev, [name]: value.toLowerCase() }));
+    } else {
+      setFormData((prev) => ({ ...prev, [name]: value.toUpperCase() }));
+    }
+
     if (name === 'codigoPostal' && value.length === 5) {
       try {
         const response = await fetch(`https://api.zippopotam.us/mx/${value}`);
-        if (response.ok) {
-          const data = await response.json();
-          const listaColonias = data.places.map(place => place['place name'].toUpperCase());
-          
-          // --- INTELIGENCIA DE CIUDADES ---
-          let ciudadDetectada = "";
-          if (value.startsWith('228') || value.startsWith('227')) {
-            ciudadDetectada = "ENSENADA";
-          } else if (value.startsWith('22') && !value.startsWith('228') && !value.startsWith('227')) {
-            ciudadDetectada = "TIJUANA / ROSARITO"; // 22000 a 22699
-          } else if (value.startsWith('21')) {
-            ciudadDetectada = "MEXICALI / TECATE"; // 21000 a 21999
-          } else {
-            // Si viene de otro estado, le ponemos el nombre del Estado como respaldo
-            ciudadDetectada = data.places[0]['state'].toUpperCase(); 
-          }
-          
-          setColoniasDisponibles(listaColonias);
-          
-          setFormData(prev => ({ 
-            ...prev, 
-            codigoPostal: value,
-            ciudad: ciudadDetectada,
-            colonia: listaColonias.length > 0 ? listaColonias[0] : ''
-          }));
+        if (!response.ok) {
+          setColoniasDisponibles([]);
+          return;
         }
+        const data = await response.json();
+        const listaColonias = data.places.map((place) => place['place name'].toUpperCase());
+
+        let ciudadDetectada = '';
+        if (value.startsWith('228') || value.startsWith('227')) {
+          ciudadDetectada = 'ENSENADA';
+        } else if (value.startsWith('22') && !value.startsWith('228') && !value.startsWith('227')) {
+          ciudadDetectada = 'TIJUANA / ROSARITO';
+        } else if (value.startsWith('21')) {
+          ciudadDetectada = 'MEXICALI / TECATE';
+        } else {
+          ciudadDetectada = data.places[0]?.state?.toUpperCase() || '';
+        }
+
+        setColoniasDisponibles(listaColonias);
+        setFormData((prev) => ({
+          ...prev,
+          codigoPostal: value,
+          ciudad: ciudadDetectada,
+          colonia: listaColonias[0] || '',
+        }));
       } catch (error) {
-        console.warn("No se pudo autocompletar el CP", error);
-        setColoniasDisponibles([]); 
+        console.warn('No pude autocompletar el codigo postal.', error);
+        setColoniasDisponibles([]);
       }
     }
   };
 
-  // --- LÓGICA DE EDAD (MENOR DE EDAD) ---
   const esMenorDeEdad = useMemo(() => {
     if (!formData.fechaNacimiento) return false;
     const birthDate = new Date(formData.fechaNacimiento);
     const today = new Date();
     let age = today.getFullYear() - birthDate.getFullYear();
-    const m = today.getMonth() - birthDate.getMonth();
-    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
-      age--;
+    const monthDiff = today.getMonth() - birthDate.getMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+      age -= 1;
     }
     return age < 18;
   }, [formData.fechaNacimiento]);
 
-  // --- ARQUITECTURA DE PASOS DINÁMICOS ---
-  const formSteps = [
-    { id: 'personal', title: 'PERSONALES' }
-  ];
-  if (esMenorDeEdad) {
-    formSteps.push({ id: 'tutor', title: 'TUTOR' });
-  }
-  formSteps.push({ id: 'medico', title: 'MÉDICO' });
-  formSteps.push({ id: 'contrato', title: 'CONTRATO' });
+  const formSteps = useMemo(() => {
+    const steps = [{ id: 'personal', title: 'PERSONALES' }];
+    if (esMenorDeEdad) {
+      steps.push({ id: 'tutor', title: 'TUTOR' });
+    }
+    steps.push({ id: 'medico', title: 'MEDICO' });
+    steps.push({ id: 'contrato', title: 'CONTRATO' });
+    return steps;
+  }, [esMenorDeEdad]);
 
-  // --- VALIDACIONES ---
   const validarPasoActual = () => {
     const currentStepId = formSteps[step - 1].id;
 
     if (currentStepId === 'personal') {
-      if (!formData.nombres || !formData.apellidos || !formData.fechaNacimiento || !formData.telefono || !formData.direccion || !formData.numeroCasa || !formData.codigoPostal || !formData.ciudad) {
-        alert("⚠️ POR FAVOR, LLENA TODOS LOS CAMPOS OBLIGATORIOS DEL PASO 1.");
+      const faltanDatos = [
+        formData.nombres,
+        formData.apellidoPaterno,
+        formData.fechaNacimiento,
+        formData.telefono,
+        formData.direccion,
+        formData.numeroCasa,
+        formData.codigoPostal,
+        formData.ciudad,
+      ].some((field) => !field);
+      if (faltanDatos) {
+        alert('Llena todos los campos obligatorios del paso 1.');
         return false;
       }
     }
+
     if (currentStepId === 'tutor') {
-      if (!formData.tutorNombre || !formData.tutorTelefono || !formData.tutorFechaNacimiento) {
-        alert("⚠️ AL SER MENOR DE EDAD, LOS DATOS DEL TUTOR SON OBLIGATORIOS.");
+      const faltanDatosTutor = [
+        formData.tutorNombres,
+        formData.tutorApellidoPaterno,
+        formData.tutorTelefono,
+        formData.tutorFechaNacimiento,
+      ].some((field) => !field);
+      if (faltanDatosTutor) {
+        alert('Como el peleador es menor de edad, necesito los datos del tutor.');
         return false;
       }
     }
-    if (currentStepId === 'medico') {
-      if (formData.sistemaSalud !== 'NO TENGO' && !formData.consultorio) {
-        alert("⚠️ DEBES ESPECIFICAR LA CLÍNICA DE TU SISTEMA DE SALUD.");
-        return false;
-      }
-    }
+
     return true;
   };
 
-  const handleNextStep = () => {
-    if (!validarPasoActual()) return;
-    setStep(prev => prev + 1);
+  const capturarFoto = () => {
+    if (!webcamRef.current) return;
+    const imageSrc = webcamRef.current.getScreenshot();
+    setFormData((prev) => ({ ...prev, fotoPerfil: imageSrc }));
   };
 
-  const prevStep = () => setStep(prev => prev - 1);
-
-  // --- HARDWARE ---
-  const capturarFoto = useCallback(() => {
-    if (webcamRef.current) {
-      const imageSrc = webcamRef.current.getScreenshot();
-      setFormData(prev => ({ ...prev, fotoPerfil: imageSrc }));
-    }
-  }, [webcamRef]);
-
   const limpiarFirma = () => {
-    if (sigPad.current) sigPad.current.clear();
+    if (sigPad.current) {
+      sigPad.current.clear();
+    }
+  };
+
+  const construirPayload = (matricula, firmaData) => {
+    return {
+      matricula,
+      nombre: formData.nombres.trim(),
+      apellido_paterno: formData.apellidoPaterno.trim(),
+      apellido_materno: formData.apellidoMaterno.trim(),
+      fecha_nacimiento: formData.fechaNacimiento,
+      colonia: formData.colonia.trim(),
+      calle: formData.direccion.trim(),
+      numero_exterior: formData.numeroCasa.trim(),
+      codigo_postal: formData.codigoPostal.trim(),
+      ciudad: formData.ciudad.trim(),
+      telefono: formData.telefono.trim(),
+      correo: formData.email.trim(),
+      tipo_sangre: formData.grupoSanguineo,
+      contacto_emergencia: formData.emergNombre.trim(),
+      telefono_emergencia: formData.emergTelefono.trim(),
+      seguro_medico: formData.sistemaSalud,
+      consultorio: formData.consultorio.trim(),
+      alergias: formData.alergias.trim(),
+      lesiones: formData.lesiones.trim() || formData.tratamientos.trim(),
+      tutor_nombre: formData.tutorNombres.trim(),
+      tutor_apellido_paterno: formData.tutorApellidoPaterno.trim(),
+      tutor_apellido_materno: formData.tutorApellidoMaterno.trim(),
+      tutor_telefono: formData.tutorTelefono.trim(),
+      tutor_correo: formData.tutorCorreo.trim(),
+      tutor_fecha_nacimiento: formData.tutorFechaNacimiento,
+      gimnasio_id: gymContext?.id || null,
+      tipo_pago_sugerido: formData.tipoMembresia,
+      foto_data_url: formData.fotoPerfil,
+      firma_data_url: firmaData,
+    };
   };
 
   const handleGuardarFinal = async () => {
-    if (!formData.fotoPerfil) return alert("⚠️ DEBES TOMAR LA FOTO DE PERFIL.");
-    if (!formData.aceptoTerminos) return alert("⚠️ DEBES MARCAR LA CASILLA DE ACEPTAR LOS TÉRMINOS.");
-    if (!sigPad.current || sigPad.current.isEmpty()) return alert("⚠️ SE REQUIERE LA FIRMA DEL ACUERDO.");
+    if (!formData.fotoPerfil) {
+      alert('Debes tomar la foto de perfil.');
+      return;
+    }
+    if (!formData.aceptoTerminos) {
+      alert('Debes aceptar el acuerdo.');
+      return;
+    }
+    if (!sigPad.current || sigPad.current.isEmpty()) {
+      alert('Necesito la firma para continuar.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setServerMessage('');
 
     try {
       const firmaData = sigPad.current.getCanvas().toDataURL('image/png');
-      setFormData(prev => ({ ...prev, firmaDigital: firmaData }));
-      
-      const ultimoPeleador = await db.fighters.orderBy('id').last();
-      let nuevaMatricula = "CT-26000"; 
-      
-      if (ultimoPeleador && ultimoPeleador.matricula && ultimoPeleador.matricula.startsWith("CT-26")) {
-        const numeroActual = parseInt(ultimoPeleador.matricula.replace("CT-26", ""));
-        if (!isNaN(numeroActual)) {
-          const nuevoNumero = (numeroActual + 1).toString().padStart(3, '0');
-          nuevaMatricula = `CT-26${nuevoNumero}`;
+      const nuevaMatricula = generarMatriculaUnica();
+      const payload = construirPayload(nuevaMatricula, firmaData);
+
+      try {
+        const response = await fetchApi('/api/registro', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const responseText = await response.text();
+        let result = {};
+        try {
+          result = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          result = {};
         }
+
+        if (!response.ok) {
+          throw new Error(
+            result.message
+            || responseText
+            || `No pude guardar el registro en el servidor. Codigo ${response.status}.`
+          );
+        }
+        setServerMessage('Solicitud enviada correctamente. El entrenador la guardara en el sistema al confirmar el pago.');
+      } catch (error) {
+        console.warn('No pude enviar la solicitud a Flask.', error);
+        throw error;
       }
 
-      const fighterDataCompleto = {
-        ...formData,
-        firmaDigital: firmaData,
-        matricula: nuevaMatricula,
-        name: `${formData.nombres} ${formData.apellidos}`.trim()
-      };
-
-      await addFighterFull(fighterDataCompleto);
       setMatriculaGenerada(nuevaMatricula);
-      setStep(formSteps.length + 1); // Pasamos al paso de éxito
-
+      setStep(formSteps.length + 1);
     } catch (error) {
-      console.error("❌ ERROR CRÍTICO EN GUARDADO:", error);
-      alert("❌ OCURRIÓ UN ERROR AL GUARDAR. ABRE LA CONSOLA PARA VER DETALLES.");
+      console.error('Error al guardar el registro:', error);
+      alert(error.message || 'Ocurrio un error al guardar el registro.');
+    } finally {
+      setIsSubmitting(false);
     }
+  };
+
+  const getTutorNombreCompleto = () => {
+    return [
+      formData.tutorNombres,
+      formData.tutorApellidoPaterno,
+      formData.tutorApellidoMaterno,
+    ].filter(Boolean).join(' ');
   };
 
   const generarPDF = () => {
     const doc = new jsPDF('p', 'mm', 'a4');
-    const nombreCompleto = `${formData.nombres} ${formData.apellidos}`;
-    
+    const nombreCompleto = getFighterDisplayName(normalizeFighterRecord({
+      nombre: formData.nombres,
+      apellido_paterno: formData.apellidoPaterno,
+      apellido_materno: formData.apellidoMaterno,
+    }));
+
     doc.setFontSize(22);
     doc.setTextColor(31, 42, 68);
-    doc.text("TEAM COTA'S MUAY THAI", 105, 20, null, null, "center");
+    doc.text("TEAM COTA'S MUAY THAI", 105, 20, null, null, 'center');
     doc.setFontSize(14);
-    doc.text("FICHA DE INSCRIPCIÓN Y EXPEDIENTE MÉDICO", 105, 30, null, null, "center");
+    doc.text('FICHA DE INSCRIPCION Y EXPEDIENTE MEDICO', 105, 30, null, null, 'center');
 
     doc.setFontSize(10);
     doc.setTextColor(0, 0, 0);
-    doc.text(`Matrícula: ${matriculaGenerada}`, 20, 50);
+    doc.text(`Matricula: ${matriculaGenerada}`, 20, 50);
     doc.text(`Nombre: ${nombreCompleto}`, 20, 58);
-    doc.text(`Fecha Nacimiento: ${formData.fechaNacimiento}`, 20, 66);
-    doc.text(`Membresía: ${formData.tipoMembresia}`, 20, 74);
-    doc.text(`Teléfono: ${formData.telefono}`, 20, 82);
+    doc.text(`Fecha nacimiento: ${formData.fechaNacimiento}`, 20, 66);
+    doc.text(`Membresia: ${formData.tipoMembresia}`, 20, 74);
+    doc.text(`Telefono: ${formData.telefono}`, 20, 82);
     doc.text(`Ciudad: ${formData.ciudad} (CP: ${formData.codigoPostal})`, 20, 90);
     doc.text(`Emergencia: ${formData.emergNombre} (${formData.emergTelefono})`, 20, 98);
 
     if (esMenorDeEdad) {
-      doc.setTextColor(220, 53, 69); // Rojo para destacar al tutor
-      doc.text(`TUTOR: ${formData.tutorNombre} (Tel: ${formData.tutorTelefono})`, 20, 106);
+      doc.setTextColor(220, 53, 69);
+      doc.text(`Tutor: ${getTutorNombreCompleto()} (Tel: ${formData.tutorTelefono})`, 20, 106);
       doc.setTextColor(0, 0, 0);
     }
 
@@ -219,237 +322,276 @@ nombres: '', apellidos: '', fechaNacimiento: '',
     doc.setFillColor(230, 230, 230);
     doc.rect(20, 115, 170, 7, 'F');
     doc.setFont(undefined, 'bold');
-    doc.text("EXPEDIENTE MÉDICO", 25, 120);
-    
+    doc.text('EXPEDIENTE MEDICO', 25, 120);
+
     doc.setFont(undefined, 'normal');
-    doc.text(`Tipo de Sangre: ${formData.grupoSanguineo}`, 20, 132);
-    doc.text(`Sistema de Salud: ${formData.sistemaSalud} - ${formData.consultorio}`, 20, 140);
+    doc.text(`Tipo de sangre: ${formData.grupoSanguineo}`, 20, 132);
+    doc.text(`Sistema de salud: ${formData.sistemaSalud} - ${formData.consultorio}`, 20, 140);
     doc.text(`Alergias: ${formData.alergias || 'Ninguna'}`, 20, 148);
-    doc.text(`Padecimientos: ${formData.padecimientos || 'Ninguno'}`, 20, 156);
+    doc.text(`Lesiones: ${formData.lesiones || 'Ninguna'}`, 20, 156);
 
     doc.setFillColor(230, 230, 230);
     doc.rect(20, 168, 170, 7, 'F');
     doc.setFont(undefined, 'bold');
-    doc.text("ACUERDO Y FIRMA", 25, 173);
-    
+    doc.text('ACUERDO Y FIRMA', 25, 173);
+
     doc.setFont(undefined, 'normal');
     doc.setFontSize(8);
     const contratoLineas = doc.splitTextToSize(getContratoLegal(), 170);
     doc.text(contratoLineas, 20, 182);
 
-    if (formData.firmaDigital) {
-      doc.addImage(formData.firmaDigital, 'PNG', 70, 240, 70, 25);
+    if (!sigPad.current?.isEmpty()) {
+      const firmaData = sigPad.current.getCanvas().toDataURL('image/png');
+      doc.addImage(firmaData, 'PNG', 70, 240, 70, 25);
       doc.line(70, 265, 140, 265);
       doc.setFontSize(10);
-      doc.text(esMenorDeEdad ? "FIRMA DEL TUTOR" : "FIRMA DE CONFORMIDAD", 105, 270, null, null, "center");
+      doc.text(esMenorDeEdad ? 'FIRMA DEL TUTOR' : 'FIRMA DE CONFORMIDAD', 105, 270, null, null, 'center');
     }
 
     doc.save(`Contrato_${matriculaGenerada}_${formData.nombres}.pdf`);
   };
 
   const getContratoLegal = () => {
-    let base = `LIBERACIÓN DE RESPONSABILIDAD\n\n`;
-    
+    let base = 'LIBERACION DE RESPONSABILIDAD\n\n';
+
     if (esMenorDeEdad) {
-      base += `Yo, ${formData.tutorNombre || '_________________'}, en mi carácter de padre, madre o tutor legal de ${formData.nombres || '_________________'}, soy mayor de 18 años y he leído, comprendido y doy mi consentimiento a lo siguiente.\n\n`;
+      base += `Yo, ${getTutorNombreCompleto() || '_________________'}, en mi caracter de padre, madre o tutor legal de ${formData.nombres || '_________________'}, he leido, comprendido y doy mi consentimiento a lo siguiente.\n\n`;
     } else {
-      base += `Soy mayor de 18 años y he leído, comprendido y doy consentimiento a lo siguiente.\n\n`;
+      base += 'Soy mayor de edad y he leido, comprendido y doy consentimiento a lo siguiente.\n\n';
     }
 
-    base += `El participante entiende que está haciendo parte en un deporte que tiene contacto corporal y el cual requerirá que el participante haga parte en ejercicios de acondicionamiento y otras actividades que implican riesgo. Asumimos la plena responsabilidad de todas las acciones durante las actividades.\n\nLiberamos a Team Cota's Muay Thai y a todos los empleados, de cualquier lesión física leve o grave, la muerte o daños materiales sufridos durante la participación en el entrenamiento.\n\nDoy consentimiento para que puedan subir fotos y vídeos a redes sociales donde aparezca durante los entrenamientos para publicidad del gimnasio.`;
-    
-    if (formData.tipoMembresia === 'VISITA / EVENTUAL' || formData.tipoMembresia === 'SEMANA') {
-      return `${base}\n\nCLÁUSULA EVENTUAL:\nAl ser un miembro eventual sin pago de inscripción, acepto seguir todas las normas y reglas del gimnasio. Entiendo que el gimnasio no se hace cargo de accidentes y que, después de un periodo de inactividad, el registro podrá ser dado de baja del sistema sin previo aviso.`;
-    } else {
-      return `${base}\n\nCLÁUSULA DE MENSUALIDAD:\nMe comprometo a realizar los pagos de mensualidad a tiempo. Entiendo que después de cuatro (4) meses de no estar pagando a tiempo, el registro será dado de baja del sistema automáticamente y se deberá cubrir nuevamente la inscripción.`;
+    base += "El participante entiende que esta haciendo parte en un deporte con contacto corporal y actividades que implican riesgo. Asumo la responsabilidad de las acciones durante las actividades.\n\nLibero a Team Cota's Muay Thai y a su personal de cualquier lesion fisica, muerte o danos materiales sufridos durante la participacion en el entrenamiento.\n\nDoy consentimiento para el uso de imagen en fotos y videos de publicidad del gimnasio.";
+
+    const tiposEventuales = ['VISITA', 'SEMANA', 'DOS SEMANAS'];
+    if (tiposEventuales.includes(formData.tipoMembresia)) {
+      return `${base}\n\nCLAUSULA EVENTUAL:\nAcepto seguir todas las reglas del gimnasio. Entiendo que el gimnasio no se hace cargo de accidentes y que, despues de un periodo de inactividad, mi registro puede darse de baja sin previo aviso.`;
     }
+
+    return `${base}\n\nCLAUSULA DE MENSUALIDAD:\nMe comprometo a realizar mis pagos a tiempo. Entiendo que, despues de cuatro meses sin pagar, el registro puede darse de baja y sera necesario cubrir nuevamente la inscripcion.`;
   };
 
-  // --- RENDERIZADO DE LOS PASOS ---
+  const handleNextStep = () => {
+    if (!validarPasoActual()) return;
+    setStep((prev) => prev + 1);
+  };
+
+  const prevStep = () => setStep((prev) => prev - 1);
 
   const renderStep1 = () => (
     <div className="fade-in">
       <h3 style={stepTitleStyle}>PASO 1: DATOS PERSONALES</h3>
-      <div style={gridResponsive}>
-        <Input label="NOMBRES *" name="nombres" val={formData.nombres} onChange={handleChange} />
-        <Input label="APELLIDOS *" name="apellidos" val={formData.apellidos} onChange={handleChange} />
-        {/* Usamos max={hoy} para que el calendario no deje elegir fechas futuras */}
-        <Input 
-          label="FECHA DE NACIMIENTO *" 
-          name="fechaNacimiento" 
-          type="date" 
-          val={formData.fechaNacimiento} 
-          onChange={handleChange} 
-          max={new Date().toISOString().split('T')[0]} 
-        />
-        <Input label="TELÉFONO MÓVIL *" name="telefono" type="number" val={formData.telefono} onChange={handleChange} ph="10 dígitos" />
+      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr 1fr' }}>
+        <Input label="NOMBRE(S) *" name="nombres" val={formData.nombres} onChange={handleChange} />
+        <Input label="APELLIDO PATERNO *" name="apellidoPaterno" val={formData.apellidoPaterno} onChange={handleChange} />
+        <Input label="APELLIDO MATERNO" name="apellidoMaterno" val={formData.apellidoMaterno} onChange={handleChange} />
       </div>
-<h4 style={sectionSubtitleStyle}>DOMICILIO</h4>
+
+      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr' }}>
+        <Input label="FECHA DE NACIMIENTO *" name="fechaNacimiento" type="date" val={formData.fechaNacimiento} onChange={handleChange} />
+        <Input label="TELEFONO MOVIL *" name="telefono" type="number" val={formData.telefono} onChange={handleChange} ph="10 digitos" />
+      </div>
+
+      <h4 style={sectionSubtitleStyle}>DOMICILIO</h4>
       <div style={gridResponsive}>
-<Input label="C.P. *" name="codigoPostal" type="number" val={formData.codigoPostal} onChange={handleChange} ph="Ej. 22800" />
-        
-        {/* COLONIA: Se vuelve lista desplegable si la API la encuentra */}
+        <Input label="C.P. *" name="codigoPostal" type="number" val={formData.codigoPostal} onChange={handleChange} ph="Ej. 22800" />
         <div>
-          <label style={labelStyle}>COLONIA / FRACC. *</label>
+          <label style={labelStyle}>COLONIA *</label>
           {coloniasDisponibles.length > 0 ? (
             <select name="colonia" value={formData.colonia} onChange={handleChange} style={inputStyle}>
-              {coloniasDisponibles.map((col, i) => <option key={i} value={col}>{col}</option>)}
+              {coloniasDisponibles.map((colonia, index) => (
+                <option key={index} value={colonia}>{colonia}</option>
+              ))}
             </select>
           ) : (
-            <input name="colonia" value={formData.colonia} onChange={handleChange} style={inputStyle} placeholder="Escribe tu colonia..." />
+            <input name="colonia" value={formData.colonia} onChange={handleChange} style={inputStyle} placeholder="Escribe tu colonia" />
           )}
         </div>
       </div>
-      
-      {/* SEPARADOS: Calle, Número y Ciudad */}
+
       <div style={{ ...gridResponsive, gridTemplateColumns: '2fr 1fr 1fr' }}>
-        <Input label="CALLE / AVENIDA *" name="direccion" val={formData.direccion} onChange={handleChange} ph="Ej. Av. Reforma" />
-        <Input label="NÚMERO *" name="numeroCasa" val={formData.numeroCasa} onChange={handleChange} ph="Ej. 123" />
+        <Input label="CALLE *" name="direccion" val={formData.direccion} onChange={handleChange} />
+        <Input label="NUMERO *" name="numeroCasa" val={formData.numeroCasa} onChange={handleChange} />
         <Input label="CIUDAD *" name="ciudad" val={formData.ciudad} onChange={handleChange} />
       </div>
+
       <div style={gridResponsive}>
-        <Input label="CORREO ELECTRÓNICO" name="email" type="email" val={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value.toLowerCase()})} />
+        <Input label="CORREO" name="email" type="email" val={formData.email} onChange={handleChange} />
         <div>
-          <label style={labelStyle}>GRUPO SANGUÍNEO *</label>
+          <label style={labelStyle}>GRUPO SANGUINEO</label>
           <select name="grupoSanguineo" value={formData.grupoSanguineo} onChange={handleChange} style={inputStyle}>
-            <option value="NO SABE">NO SABE</option><option value="O+">O+</option><option value="O-">O-</option>
-            <option value="A+">A+</option><option value="A-">A-</option><option value="B+">B+</option><option value="B-">B-</option>
-            <option value="AB+">AB+</option><option value="AB-">AB-</option>
+            <option value="NO SABE">NO SABE</option>
+            <option value="O+">O+</option>
+            <option value="O-">O-</option>
+            <option value="A+">A+</option>
+            <option value="A-">A-</option>
+            <option value="B+">B+</option>
+            <option value="B-">B-</option>
+            <option value="AB+">AB+</option>
+            <option value="AB-">AB-</option>
           </select>
         </div>
       </div>
+
       <h4 style={sectionSubtitleStyle}>CONTACTO DE EMERGENCIA</h4>
       <div style={gridResponsive}>
         <Input label="NOMBRE COMPLETO" name="emergNombre" val={formData.emergNombre} onChange={handleChange} />
-        <Input label="TELÉFONO" name="emergTelefono" type="number" val={formData.emergTelefono} onChange={handleChange} />
+        <Input label="TELEFONO" name="emergTelefono" type="number" val={formData.emergTelefono} onChange={handleChange} />
       </div>
     </div>
   );
 
   const renderStepTutor = () => (
     <div className="fade-in">
-      <h3 style={stepTitleStyle}>PASO 2: DATOS DEL TUTOR LEGAL</h3>
-      <div style={{ padding: '15px', backgroundColor: '#fff3cd', borderLeft: '5px solid #ffc107', borderRadius: '4px', marginBottom: '25px' }}>
-        <p style={{ margin: 0, color: '#856404', fontWeight: 'bold', fontSize: '0.9rem' }}>⚠️ Atención: El peleador es menor de edad. Se requiere la información de un padre o tutor legal para el contrato.</p>
+      <h3 style={stepTitleStyle}>PASO 2: DATOS DEL TUTOR</h3>
+      <div style={warningBoxStyle}>
+        Necesito la informacion del tutor porque el peleador es menor de edad.
       </div>
-      <div style={gridResponsive}>
-        <Input label="NOMBRE DEL TUTOR *" name="tutorNombre" val={formData.tutorNombre} onChange={handleChange} />
-        <Input label="TELÉFONO DEL TUTOR *" name="tutorTelefono" type="number" val={formData.tutorTelefono} onChange={handleChange} />
-        <Input label="CORREO DEL TUTOR" name="tutorCorreo" type="email" val={formData.tutorCorreo} onChange={(e) => setFormData({...formData, tutorCorreo: e.target.value.toLowerCase()})} />
-        <Input label="FECHA NACIMIENTO TUTOR *" name="tutorFechaNacimiento" type="date" val={formData.tutorFechaNacimiento} onChange={handleChange} />
+      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr 1fr' }}>
+        <Input label="NOMBRE(S) *" name="tutorNombres" val={formData.tutorNombres} onChange={handleChange} />
+        <Input label="APELLIDO PATERNO *" name="tutorApellidoPaterno" val={formData.tutorApellidoPaterno} onChange={handleChange} />
+        <Input label="APELLIDO MATERNO" name="tutorApellidoMaterno" val={formData.tutorApellidoMaterno} onChange={handleChange} />
+      </div>
+      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr 1fr' }}>
+        <Input label="TELEFONO *" name="tutorTelefono" type="number" val={formData.tutorTelefono} onChange={handleChange} />
+        <Input label="CORREO" name="tutorCorreo" type="email" val={formData.tutorCorreo} onChange={handleChange} />
+        <Input label="FECHA DE NACIMIENTO *" name="tutorFechaNacimiento" type="date" val={formData.tutorFechaNacimiento} onChange={handleChange} />
       </div>
     </div>
   );
 
   const renderStepMedico = () => (
     <div className="fade-in">
-      <h3 style={stepTitleStyle}>EXPEDIENTE MÉDICO</h3>
+      <h3 style={stepTitleStyle}>EXPEDIENTE MEDICO</h3>
       <div style={gridResponsive}>
         <div>
-          <label style={labelStyle}>SISTEMA DE SALUD *</label>
+          <label style={labelStyle}>SISTEMA DE SALUD</label>
           <select name="sistemaSalud" value={formData.sistemaSalud} onChange={handleChange} style={inputStyle}>
-            <option value="NO TENGO">NO TENGO</option><option value="IMSS">IMSS</option>
-            <option value="ISSSTECALI">ISSSTECALI</option><option value="ISSSTE">ISSSTE</option>
+            <option value="NO TENGO">NO TENGO</option>
+            <option value="IMSS">IMSS</option>
+            <option value="ISSSTECALI">ISSSTECALI</option>
+            <option value="ISSSTE">ISSSTE</option>
             <option value="SEGURO PRIVADO">SEGURO PRIVADO</option>
           </select>
         </div>
         {formData.sistemaSalud !== 'NO TENGO' && (
-          <Input label="CLÍNICA / CONSULTORIO *" name="consultorio" val={formData.consultorio} onChange={handleChange} />
+          <Input label="CLINICA / CONSULTORIO" name="consultorio" val={formData.consultorio} onChange={handleChange} />
         )}
       </div>
-      <TextArea label="ALERGIAS" name="alergias" val={formData.alergias} onChange={handleChange} ph="Ej. Penicilina, polvo (Dejar en blanco si no tiene)" />
-      <TextArea label="¿PADECIMIENTOS, CIRUGÍAS O MEDICAMENTOS DE RELEVANCIA?" name="padecimientos" val={formData.padecimientos} onChange={handleChange} ph="Especifique detalles..." />
-      <TextArea label="¿TRATAMIENTO MÉDICO QUE REQUIERA CUIDADOS?" name="tratamientos" val={formData.tratamientos} onChange={handleChange} ph="Especifique detalles..." />
+      <TextArea label="ALERGIAS" name="alergias" val={formData.alergias} onChange={handleChange} />
+      <TextArea label="LESIONES" name="lesiones" val={formData.lesiones} onChange={handleChange} />
+      <TextArea label="TRATAMIENTOS" name="tratamientos" val={formData.tratamientos} onChange={handleChange} />
     </div>
   );
 
   const renderStepContrato = () => (
     <div className="fade-in">
       <h3 style={stepTitleStyle}>FOTO Y CONTRATO</h3>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '40px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '32px' }}>
         <div>
           <label style={labelStyle}>FOTO DEL PELEADOR *</label>
-          <div style={{ border: '2px solid #1F2A44', borderRadius: '8px', overflow: 'hidden', height: '260px', backgroundColor: '#000', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <div style={cameraBoxStyle}>
             {formData.fotoPerfil ? (
               <img src={formData.fotoPerfil} alt="Perfil" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             ) : (
-              <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" videoConstraints={{ facingMode: "user" }} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" videoConstraints={{ facingMode: 'user' }} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             )}
           </div>
-          <button onClick={formData.fotoPerfil ? () => setFormData({...formData, fotoPerfil: null}) : capturarFoto} style={{ width: '100%', padding: '12px', marginTop: '10px', backgroundColor: '#1F2A44', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
-            {formData.fotoPerfil ? '🔄 RETOMAR FOTO' : '📷 CAPTURAR FOTO'}
+          <button onClick={formData.fotoPerfil ? () => setFormData((prev) => ({ ...prev, fotoPerfil: null })) : capturarFoto} style={secondaryButtonStyle}>
+            {formData.fotoPerfil ? 'Tomar otra foto' : 'Capturar foto'}
           </button>
-          <div style={{ marginTop: '20px' }}>
-            <label style={labelStyle}>TIPO DE MEMBRESÍA *</label>
+
+          <div style={{ marginTop: '16px' }}>
+            <label style={labelStyle}>TIPO DE MEMBRESIA *</label>
             <select name="tipoMembresia" value={formData.tipoMembresia} onChange={handleChange} style={inputStyle}>
-              <option value="VISITA / EVENTUAL">VISITA / EVENTUAL (Sin inscripción)</option>
-              <option value="SEMANA">SEMANA (Sin inscripción)</option>
-              <option value="MENSUALIDAD">MENSUALIDAD REGULAR</option>
+              <option value="MENSUALIDAD + INSCRIPCION">MENSUALIDAD + INSCRIPCION</option>
+              <option value="PROPORCIONAL + INSCRIPCION">PROPORCIONAL + INSCRIPCION</option>
+              <option value="MENSUALIDAD">MENSUALIDAD</option>
+              <option value="DOS SEMANAS">DOS SEMANAS</option>
+              <option value="SEMANA">SEMANA</option>
+              <option value="VISITA">VISITA</option>
             </select>
           </div>
         </div>
+
         <div>
-          <label style={labelStyle}>ACUERDO DE LIBERACIÓN Y NORMAS</label>
-          <div style={{ height: '180px', overflowY: 'scroll', backgroundColor: '#f0f0f0', padding: '15px', borderRadius: '8px', fontSize: '0.75rem', color: '#333', border: '1px solid #ccc', marginBottom: '15px', whiteSpace: 'pre-wrap' }}>
-            {getContratoLegal()}
-          </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', cursor: 'pointer' }}>
-            <input type="checkbox" style={{ width: '25px', height: '25px', cursor: 'pointer' }} checked={formData.aceptoTerminos} onChange={(e) => setFormData({...formData, aceptoTerminos: e.target.checked})} />
-            <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: formData.aceptoTerminos ? '#28a745' : '#dc3545' }}>HE LEÍDO Y DOY MI CONSENTIMIENTO *</span>
+          <label style={labelStyle}>ACUERDO</label>
+          <div style={contractBoxStyle}>{getContratoLegal()}</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px', cursor: 'pointer' }}>
+            <input type="checkbox" checked={formData.aceptoTerminos} onChange={(e) => setFormData((prev) => ({ ...prev, aceptoTerminos: e.target.checked }))} />
+            <span style={{ fontSize: '0.85rem', color: formData.aceptoTerminos ? '#2d2e30' : '#b42318' }}>He leido y acepto el acuerdo</span>
           </label>
-          <label style={{...labelStyle, opacity: formData.aceptoTerminos ? 1 : 0.5 }}>{esMenorDeEdad ? 'FIRMA DIGITAL DEL TUTOR *' : 'FIRMA DIGITAL DEL PELEADOR *'}</label>
-          <div style={{ border: '2px dashed #ccc', borderRadius: '8px', backgroundColor: '#fff', pointerEvents: formData.aceptoTerminos ? 'auto' : 'none', opacity: formData.aceptoTerminos ? 1 : 0.5, touchAction: 'none' }}>
-            <SignatureCanvas ref={sigPad} penColor="black" canvasProps={{ width: 450, height: 160, className: 'sigCanvas', style: { width: '100%', height: '100%' } }} />
+          <label style={{ ...labelStyle, opacity: formData.aceptoTerminos ? 1 : 0.5 }}>
+            {esMenorDeEdad ? 'FIRMA DEL TUTOR *' : 'FIRMA DEL PELEADOR *'}
+          </label>
+          <div style={{ ...signatureBoxStyle, opacity: formData.aceptoTerminos ? 1 : 0.5, pointerEvents: formData.aceptoTerminos ? 'auto' : 'none' }}>
+            <SignatureCanvas
+              ref={sigPad}
+              penColor="black"
+              backgroundColor="white"
+              clearOnResize={false}
+              canvasProps={{
+                width: Math.min(window.innerWidth * 0.55, 380),
+                height: 170,
+              }}
+            />
           </div>
-          <button onClick={limpiarFirma} style={{ background: 'none', border: 'none', color: '#888', textDecoration: 'underline', marginTop: '5px', cursor: 'pointer', fontSize: '0.75rem' }}>Borrar firma</button>
+          <button onClick={limpiarFirma} style={linkButtonStyle}>Borrar firma</button>
         </div>
       </div>
     </div>
   );
 
   const renderStepSuccess = () => (
-    <div className="fade-in" style={{ textAlign: 'center', padding: '20px 0' }}>
-      <h2 style={{ color: '#28a745', fontSize: '2.5rem', marginBottom: '10px', marginTop: 0 }}>¡REGISTRO EXITOSO!</h2>
-      <h3 style={{ color: '#1F2A44', fontSize: '1.8rem', marginBottom: '30px' }}>MATRÍCULA: {matriculaGenerada}</h3>
-      <p style={{ fontWeight: '900', color: '#1F2A44', marginBottom: '20px', fontSize: '1.1rem' }}>
-        📲 PIDE AL PELEADOR QUE TOME FOTO A ESTE QR PARA SU ACCESO RÁPIDO:
-      </p>
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '40px' }}>
-        <div style={{ padding: '20px', backgroundColor: '#fff', border: '2px solid #000', borderRadius: '15px' }}>
-          <QRCodeSVG value={matriculaGenerada} size={250} />
-        </div>
+    <div className="fade-in" style={{ textAlign: 'center', padding: '18px 0' }}>
+      <h2 style={{ color: '#1F2A44', fontSize: '2rem', marginBottom: '8px', marginTop: 0 }}>REGISTRO COMPLETADO</h2>
+      <h3 style={{ color: '#FF7F27', fontSize: '1.4rem', marginBottom: '18px' }}>MATRICULA: {matriculaGenerada}</h3>
+      <div style={warningBoxStyle}>
+        El registro quedo pendiente de aprobacion. El entrenador activara tu acceso cuando apruebe y cobre tu alta.
       </div>
-      <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', flexWrap: 'wrap' }}>
-        <button onClick={generarPDF} style={{ padding: '15px 30px', backgroundColor: '#FF7F27', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '1rem' }}>
-          📄 DESCARGAR CONTRATO PDF
-        </button>
-        <button onClick={() => window.location.reload()} style={{ padding: '15px 30px', backgroundColor: '#1F2A44', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '1rem' }}>
-          ➕ FINALIZAR Y NUEVO REGISTRO
-        </button>
+      {serverMessage && <p style={{ color: '#555', fontSize: '0.9rem', marginTop: '16px' }}>{serverMessage}</p>}
+      <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', flexWrap: 'wrap', marginTop: '18px' }}>
+        <button onClick={generarPDF} style={secondaryButtonStyle}>Descargar contrato PDF</button>
+        <button onClick={() => window.location.reload()} style={primaryButtonStyle}>Nuevo registro</button>
       </div>
     </div>
   );
 
-// REEMPLAZA EL CONTENEDOR PRINCIPAL POR ESTE:
   return (
     <div style={{ display: 'flex', justifyContent: 'center', padding: '3vh 2vw', backgroundColor: '#fafafa', minHeight: '80vh' }}>
-      <div style={{ width: '95vw', maxWidth: '1200px', backgroundColor: '#ffffff', borderRadius: '15px', padding: '4vw', border: '1px solid #e0e0e0', boxShadow: '0 10px 30px rgba(0,0,0,0.05)' }}>
-        {/* Aquí adentro sigue tu código de indicadores y pasos (NO lo borres) */}
-        {/* INDICADORES DINÁMICOS */}
+      <div style={containerStyle}>
+        {publicMode && (
+          <div style={publicBannerStyle}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <FiSmartphone size={16} />
+                <strong style={{ fontSize: '0.9rem' }}>Registro desde celular</strong>
+              </div>
+              <div style={{ fontSize: '0.84rem', lineHeight: 1.45 }}>
+                Completa tu alta y envia tu solicitud. El entrenador revisara el registro antes de activarte.
+              </div>
+            </div>
+            {gymContext?.nombre && (
+              <div style={gymChipStyle}>
+                <FiMapPin size={14} />
+                <span>{gymContext.nombre}</span>
+              </div>
+            )}
+          </div>
+        )}
+
         {step <= formSteps.length && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '40px', flexWrap: 'wrap', gap: '10px' }}>
-            {formSteps.map((s, index) => {
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '28px', flexWrap: 'wrap', gap: '10px' }}>
+            {formSteps.map((item, index) => {
               const num = index + 1;
               return (
-                <div key={s.id} style={{ flex: '1 1 auto', textAlign: 'center', padding: '10px', fontWeight: '900', borderBottom: step >= num ? '4px solid #FF7F27' : '4px solid #eee', color: step >= num ? '#1F2A44' : '#ccc', transition: '0.3s', fontSize: '0.85rem' }}>
-                  {num}. {s.title}
+                <div key={item.id} style={{ flex: '1 1 auto', textAlign: 'center', padding: '8px', fontWeight: 700, borderBottom: step >= num ? '3px solid #FF7F27' : '3px solid #eee', color: step >= num ? '#1F2A44' : '#999', fontSize: '0.82rem' }}>
+                  {num}. {item.title}
                 </div>
               );
             })}
           </div>
         )}
 
-        {/* MOTOR DE RENDERIZADO DE PASOS */}
         <div style={{ minHeight: '40vh' }}>
           {step <= formSteps.length ? (
             <>
@@ -458,24 +600,19 @@ nombres: '', apellidos: '', fechaNacimiento: '',
               {formSteps[step - 1].id === 'medico' && renderStepMedico()}
               {formSteps[step - 1].id === 'contrato' && renderStepContrato()}
             </>
-          ) : (
-            renderStepSuccess()
-          )}
+          ) : renderStepSuccess()}
         </div>
 
-        {/* NAVEGACIÓN */}
         {step <= formSteps.length && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '40px', borderTop: '1px solid #eee', paddingTop: '30px' }}>
-            <button onClick={prevStep} disabled={step === 1} style={{ ...btnStyle, backgroundColor: step === 1 ? '#eee' : '#1F2A44', color: step === 1 ? '#aaa' : '#fff', cursor: step === 1 ? 'not-allowed' : 'pointer' }}>
-              ⬅ REGRESAR
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '30px', borderTop: '1px solid #eee', paddingTop: '20px', gap: '12px' }}>
+            <button onClick={prevStep} disabled={step === 1 || isSubmitting} style={{ ...secondaryButtonStyle, opacity: step === 1 || isSubmitting ? 0.6 : 1, cursor: step === 1 || isSubmitting ? 'not-allowed' : 'pointer' }}>
+              Regresar
             </button>
             {step < formSteps.length ? (
-              <button onClick={handleNextStep} style={{ ...btnStyle, backgroundColor: '#FF7F27', color: '#fff' }}>
-                SIGUIENTE PASO ➡
-              </button>
+              <button onClick={handleNextStep} style={primaryButtonStyle}>Siguiente</button>
             ) : (
-              <button onClick={handleGuardarFinal} style={{ ...btnStyle, backgroundColor: '#28a745', color: '#fff' }}>
-                ✅ GUARDAR EN SISTEMA
+              <button onClick={handleGuardarFinal} disabled={isSubmitting} style={{ ...primaryButtonStyle, opacity: isSubmitting ? 0.7 : 1 }}>
+                {isSubmitting ? 'Guardando...' : 'Guardar'}
               </button>
             )}
           </div>
@@ -485,17 +622,40 @@ nombres: '', apellidos: '', fechaNacimiento: '',
   );
 }
 
-// --- REEMPLAZA ESTOS ESTILOS AL FINAL DE TU ARCHIVO ---
-const gridResponsive = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '20px', marginBottom: '25px' };
-const stepTitleStyle = { color: '#1F2A44', borderBottom: '2px solid #FF7F27', paddingBottom: '10px', marginBottom: '20px', fontSize: '1.3rem' };
-const sectionSubtitleStyle = { color: '#1F2A44', marginBottom: '15px', fontSize: '1.1rem', fontWeight: 'bold' };
-const labelStyle = { display: 'block', fontSize: '0.8rem', fontWeight: '900', color: '#1F2A44', marginBottom: '8px', letterSpacing: '0.5px' };
-const inputStyle = { width: '100%', padding: '12px', border: '1px solid #ddd', borderRadius: '6px', fontSize: '1rem', outline: 'none', backgroundColor: '#fafafa', boxSizing: 'border-box' };
-const btnStyle = { padding: '15px 25px', border: 'none', borderRadius: '8px', fontWeight: '900', fontSize: '0.9rem', letterSpacing: '1px', cursor: 'pointer', transition: '0.2s', flex: '1 1 auto', textAlign: 'center' };
+const containerStyle = {
+  width: 'min(95vw, 1320px)',
+  backgroundColor: '#ffffff',
+  borderRadius: '14px',
+  padding: 'clamp(20px, 3vw, 42px)',
+  border: '1px solid #e0e0e0',
+  boxShadow: '0 8px 24px rgba(0,0,0,0.04)',
+};
+
+const gridResponsive = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(clamp(220px, 25vw, 300px), 1fr))', gap: '18px', marginBottom: '22px' };
+const stepTitleStyle = { color: '#1F2A44', borderBottom: '2px solid #FF7F27', paddingBottom: '10px', marginBottom: '18px', fontSize: '1.2rem' };
+const sectionSubtitleStyle = { color: '#1F2A44', marginBottom: '14px', fontSize: '1rem', fontWeight: 700 };
+const labelStyle = { display: 'block', fontSize: '0.78rem', fontWeight: 700, color: '#1F2A44', marginBottom: '8px', letterSpacing: '0.3px' };
+const inputStyle = { width: '100%', padding: '10px 12px', border: '1px solid #ddd', borderRadius: '6px', fontSize: '0.92rem', outline: 'none', backgroundColor: '#fafafa', boxSizing: 'border-box' };
+const primaryButtonStyle = { padding: '10px 16px', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '0.9rem', cursor: 'pointer', backgroundColor: '#1F2A44', color: '#fff' };
+const secondaryButtonStyle = { padding: '10px 14px', border: '1px solid #d0d5dd', borderRadius: '8px', fontWeight: 600, fontSize: '0.88rem', cursor: 'pointer', backgroundColor: '#fff', color: '#1F2A44', width: '100%', marginTop: '10px' };
+const linkButtonStyle = { background: 'none', border: 'none', color: '#667085', textDecoration: 'underline', marginTop: '6px', cursor: 'pointer', fontSize: '0.76rem' };
+const cameraBoxStyle = { border: '1px solid #d0d5dd', borderRadius: '8px', overflow: 'hidden', height: 'clamp(220px, 30vh, 320px)', backgroundColor: '#000', display: 'flex', justifyContent: 'center', alignItems: 'center' };
+const contractBoxStyle = { height: '180px', overflowY: 'scroll', backgroundColor: '#f7f7f7', padding: '14px', borderRadius: '8px', fontSize: '0.76rem', color: '#333', border: '1px solid #ddd', marginBottom: '14px', whiteSpace: 'pre-wrap' };
+const signatureBoxStyle = { border: '1px dashed #c8c8c8', borderRadius: '8px', backgroundColor: '#fff', touchAction: 'none', display: 'flex', justifyContent: 'center', overflow: 'hidden' };
+const warningBoxStyle = { padding: '14px', backgroundColor: '#fff7ed', borderLeft: '4px solid #f59e0b', borderRadius: '6px', marginBottom: '22px', color: '#92400e', fontSize: '0.9rem' };
+const publicBannerStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap', padding: '14px 16px', marginBottom: '18px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', color: '#1e293b' };
+const gymChipStyle = { display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 10px', borderRadius: '999px', backgroundColor: '#fff', border: '1px solid #d0d5dd', fontSize: '0.8rem', fontWeight: 700, color: '#1F2A44' };
 
 const Input = ({ label, name, type = 'text', val, onChange, ph }) => (
-  <div style={{ width: '100%' }}><label style={labelStyle}>{label}</label><input type={type} name={name} value={val} onChange={onChange} placeholder={ph} style={inputStyle} /></div>
+  <div style={{ width: '100%' }}>
+    <label style={labelStyle}>{label}</label>
+    <input type={type} name={name} value={val} onChange={onChange} placeholder={ph} style={inputStyle} />
+  </div>
 );
+
 const TextArea = ({ label, name, val, onChange, ph }) => (
-  <div style={{ marginBottom: '25px', width: '100%' }}><label style={labelStyle}>{label}</label><textarea name={name} value={val} onChange={onChange} placeholder={ph} rows="3" style={{ ...inputStyle, resize: 'vertical' }} /></div>
+  <div style={{ marginBottom: '22px', width: '100%' }}>
+    <label style={labelStyle}>{label}</label>
+    <textarea name={name} value={val} onChange={onChange} placeholder={ph} rows="3" style={{ ...inputStyle, resize: 'vertical' }} />
+  </div>
 );
