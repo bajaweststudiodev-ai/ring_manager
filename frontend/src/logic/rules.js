@@ -1,3 +1,5 @@
+import { parseDateLocal } from '../utils/date';
+
 export const checkAccess = (lastPayment) => {
   // 1. Si nunca ha pagado nada
   if (!lastPayment) {
@@ -5,7 +7,21 @@ export const checkAccess = (lastPayment) => {
   }
 
   const today = new Date();
-  const paymentDate = new Date(lastPayment.date);
+  const explicitExpiration = lastPayment.expiration || lastPayment.fecha_fin || null;
+  if (explicitExpiration) {
+    const expirationDate = /^\d{4}-\d{2}-\d{2}$/.test(explicitExpiration)
+      ? new Date(`${explicitExpiration}T23:59:59.999`)
+      : new Date(explicitExpiration);
+    const isExpired = today > expirationDate;
+
+    return {
+      canEnter: !isExpired,
+      reason: isExpired ? "MEMBRESÍA VENCIDA" : "AL CORRIENTE",
+      expiration: expirationDate.toISOString(),
+    };
+  }
+
+  const paymentDate = parseDateLocal(lastPayment.date);
   let expirationDate = new Date(paymentDate);
 
   const tipo = lastPayment.type.toUpperCase();

@@ -2,9 +2,24 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Ring Manager</title>
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Ring_Manager</title>
+    <meta name="theme-color" content="#1F2A44" />
+
+    <!-- Meta tags obligatorios para PWA en iOS/iPadOS standalone mode -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Ring Manager" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+
+    <!--
+      NO agregar <link rel="manifest"> aquí.
+      VitePWA lo inyecta durante el build apuntando al manifest.webmanifest
+      generado. Un manifest manual adicional haría que iOS lea el archivo
+      estático de /public/ (sin precache URLs) en lugar del generado.
+    -->
   </head>
   <body>
     <div id="root"></div>

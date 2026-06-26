@@ -30,3 +30,8 @@ body {
   border: 1px solid #000 !important;
   background-color: #000;
 }
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

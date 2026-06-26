@@ -1,7 +1,5 @@
 import { db, normalizePaymentRecord } from '../db/db';
-import { apiUrl } from '../config/api';
-
-const BACKEND_URL = apiUrl('/api/sync');
+import { fetchApi } from '../config/api';
 
 export const sincronizarConServidor = async () => {
   if (!navigator.onLine) {
@@ -19,7 +17,7 @@ export const sincronizarConServidor = async () => {
       return;
     }
 
-    const response = await fetch(BACKEND_URL, {
+    const response = await fetchApi('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -29,11 +27,14 @@ export const sincronizarConServidor = async () => {
       })
     });
 
-    if (!response.ok) {
+    // ✨ EL CAMBIO: Si NO está OK y tampoco es 409, entonces sí tiramos error.
+    if (!response.ok && response.status !== 409) {
       const result = await response.json().catch(() => ({}));
       throw new Error(result.message || 'El servidor rechazo la sincronizacion.');
     }
 
+    // Si llegamos aquí, fue un éxito (200) o un conflicto perdonado (409).
+    // Marcamos todo como sincronizado para romper el ciclo infinito.
     if (asistenciasPendientes.length > 0) {
       await db.attendance.bulkUpdate(asistenciasPendientes.map((item) => ({ key: item.id, changes: { synced: 1 } })));
     }
@@ -44,7 +45,12 @@ export const sincronizarConServidor = async () => {
       await db.payments.bulkUpdate(pagosPendientes.map((item) => ({ key: item.id, changes: { synced: 1 } })));
     }
 
-    console.log('Sincronizacion completada.');
+    if (response.status === 409) {
+      console.log('✅ Sincronizacion completada (Se ignoraron check-ins duplicados).');
+    } else {
+      console.log('✅ Sincronizacion completada con exito.');
+    }
+    
   } catch (error) {
     console.error('No pude sincronizar con el servidor:', error);
   }

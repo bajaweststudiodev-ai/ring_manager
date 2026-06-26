@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { addPayment, db, getFighterDisplayName, normalizeFighterRecord, normalizePaymentRecord } from '../db/db';
+import { addPayment, db, getFighterDisplayName, getLatestActivePaymentForFighter, normalizeFighterRecord, normalizePaymentRecord } from '../db/db';
 import { checkAccess } from '../logic/rules';
+import { resolveAssetUrl } from '../config/api';
 
 export function Members() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -38,12 +39,13 @@ export function Members() {
   const fighters = useLiveQuery(async () => {
     const allFighters = (await db.fighters.toArray()).map(normalizeFighterRecord);
     return Promise.all(allFighters.map(async (fighter) => {
-      const lastPayment = normalizePaymentRecord(await db.payments.where('peleador_matricula').equals(fighter.matricula).last());
+      const lastPayment = normalizePaymentRecord(await getLatestActivePaymentForFighter(fighter.matricula) || {});
       const access = checkAccess(lastPayment.tipo_pago ? {
         date: lastPayment.fecha_pago,
         type: lastPayment.tipo_pago,
         amount: lastPayment.monto,
-        method: lastPayment.metodo_pago
+        method: lastPayment.metodo_pago,
+        fecha_fin: lastPayment.fecha_fin,
       } : null);
       return { ...fighter, statusAccess: access };
     }));
@@ -96,7 +98,7 @@ export function Members() {
             <div key={fighter.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', alignItems: 'center', padding: '18px 25px', borderBottom: index === filteredFighters.length - 1 ? 'none' : '1px solid #eee', backgroundColor: index % 2 === 0 ? '#ffffff' : '#fafafa' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
                 <div style={{ width: '45px', height: '45px', borderRadius: '5px', backgroundColor: '#fafafa', border: '1px solid #1F2A44', overflow: 'hidden' }}>
-                  <img src={fighter.foto_path || '/avatar.png'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="avatar" />
+                  <img src={resolveAssetUrl(fighter.foto_path, '/avatar.png')} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="avatar" />
                 </div>
                 <div>
                   <div style={{ fontWeight: 900, fontSize: '1rem', color: '#1F2A44' }}>

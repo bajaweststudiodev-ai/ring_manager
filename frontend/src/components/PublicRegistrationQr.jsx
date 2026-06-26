@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { FiCheckCircle, FiCopy, FiExternalLink, FiLink2, FiRefreshCw } from 'react-icons/fi';
 import { apiUrl, fetchApi } from '../config/api';
+import { db } from '../db/db';
 
 const GIMNASIOS_API_URL = apiUrl('/api/gimnasios');
 
@@ -64,8 +65,18 @@ export function PublicRegistrationQr() {
       setGyms(list);
       setSelectedGymId((prev) => prev || (list[0] ? String(list[0].id) : ''));
     } catch (error) {
-      console.error('No pude cargar los gimnasios:', error);
-      setErrorMessage(error.message || `No pude cargar los gimnasios desde ${GIMNASIOS_API_URL}.`);
+      // Fallback offline: usar gimnasios en caché local (Dexie).
+      // Si no hay ninguno, el QR se sigue generando sin gym_id — sigue siendo válido.
+      try {
+        const localGyms = await db.gyms.toArray();
+        if (localGyms.length > 0) {
+          setGyms(localGyms);
+          setSelectedGymId((prev) => prev || String(localGyms[0].id || ''));
+        }
+        // No mostrar error: la URL del QR no requiere gym_id para funcionar
+      } catch (_) {
+        console.warn('[PublicRegistrationQr] Sin gimnasios locales ni en servidor:', error.message);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -97,9 +108,9 @@ export function PublicRegistrationQr() {
     <div style={cardStyle}>
       <div style={headerStyle}>
         <div>
-          <h3 style={{ margin: 0, fontSize: '1rem', color: '#2d2e30' }}>QR publico de registro</h3>
+          <h3 style={{ margin: 0, fontSize: '1rem', color: '#2d2e30' }}>QR publico del gimnasio</h3>
           <p style={{ margin: '6px 0 0 0', fontSize: '0.84rem', color: '#667085' }}>
-            Genera un QR para que el peleador abra el formulario desde su celular con el gimnasio precargado.
+            Genera el enlace publico del gimnasio para compartirlo por QR o copiarlo directo al celular del peleador.
           </p>
         </div>
         <button onClick={cargarGimnasios} style={ghostButtonStyle}>

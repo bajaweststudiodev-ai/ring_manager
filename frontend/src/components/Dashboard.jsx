@@ -1,296 +1,455 @@
 import React, { useEffect, useState } from 'react';
-import { FiActivity, FiCalendar, FiCheckCircle, FiCreditCard, FiList, FiShoppingCart, FiTrendingUp, FiUserCheck, FiUsers, FiWifi, FiWifiOff } from 'react-icons/fi';
-import { db, getFighterDisplayName, normalizeFighterRecord, normalizePaymentRecord } from '../db/db';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import { FiActivity, FiAlertTriangle, FiDollarSign, FiUsers, FiPackage, FiCalendar } from 'react-icons/fi';
+import { fetchApi } from '../config/api';
+import { db } from '../db/db';
 
-const PALETTE = {
-  orange: '#FF7F27',
-  white: '#fff',
-  dark: '#2d2e30',
-  green: '#00bb2d',
-  red: '#e74c3c',
-  grayBg: '#fafafa',
-  grayBorder: '#eee',
-  grayText: '#888'
+const EMPTY_KPIS = {
+  ingresos_hoy: 0,
+  ingresos_mes: 0,
+  alumnos_activos: 0,
+  alumnos_deudores: 0,
 };
 
+const EMPTY_GRAFICAS = {
+  ventas_semana: [],
+  asistencia_hora: [],
+  alertas_caja: [],
+  stock_critico: [],
+};
+
+const buildHttpError = (label, response, body) => {
+  const error = new Error(body?.message || `No pude cargar ${label}.`);
+  error.status = response.status;
+  error.statusText = response.statusText;
+  error.url = response.apiResolvedUrl || response.url;
+  error.apiBaseUrl = response.apiBaseUrl || '';
+  error.responseBody = body;
+  return error;
+};
+
+const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
+// Computa KPIs y gráficas desde IndexedDB — no requiere red.
+// Fuente de verdad offline: sales, payments, fighters, products, attendance.
+async function computeLocalStats() {
+  const today = new Date().toISOString().slice(0, 10);     // 'YYYY-MM-DD'
+  const monthStart = today.slice(0, 7);                     // 'YYYY-MM'
+
+  const [fighters, payments, sales, products, attendance] = await Promise.all([
+    db.fighters.toArray(),
+    db.payments.toArray(),
+    db.sales.toArray(),
+    db.products.toArray(),
+    db.attendance.toArray(),
+  ]);
+
+  const ingresosHoy = sales
+    .filter((s) => (s.fecha || s.date || '').startsWith(today))
+    .reduce((sum, s) => sum + Number(s.total || 0), 0);
+
+  const ingresosMes = payments
+    .filter((p) => (p.fecha_pago || p.date || '').startsWith(monthStart) && !Number(p.cancelado))
+    .reduce((sum, p) => sum + Number(p.monto || p.amount || 0), 0);
+
+  const activos = fighters.filter(
+    (f) => (f.estado || 'ACTIVO').toUpperCase() === 'ACTIVO'
+  ).length;
+
+  // Deudores: alumnos activos sin pago registrado en el mes actual
+  const pagoEsteMes = new Set(
+    payments
+      .filter((p) => (p.fecha_pago || p.date || '').startsWith(monthStart) && !Number(p.cancelado))
+      .map((p) => p.peleador_matricula || p.matricula)
+  );
+  const deudores = fighters.filter(
+    (f) => (f.estado || 'ACTIVO').toUpperCase() === 'ACTIVO' && !pagoEsteMes.has(f.matricula)
+  ).length;
+
+  // Ventas de los últimos 7 días agrupadas por día
+  const ventas_semana = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    const dayStr = d.toISOString().slice(0, 10);
+    return {
+      fecha: dayStr,
+      dia: d.toLocaleDateString('es-MX', { weekday: 'short' }),
+      total: sales
+        .filter((s) => (s.fecha || s.date || '').startsWith(dayStr))
+        .reduce((sum, s) => sum + Number(s.total || 0), 0),
+    };
+  });
+
+  // Asistencia agrupada por hora del día
+  const hourMap = {};
+  attendance.forEach((a) => {
+    const ts = a.fecha || a.date || '';
+    if (!ts) return;
+    try { hourMap[new Date(ts).getHours()] = (hourMap[new Date(ts).getHours()] || 0) + 1; } catch {}
+  });
+  const asistencia_hora = Object.entries(hourMap)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([h, total]) => ({ hora: `${h}:00`, total }));
+
+  // Productos con stock crítico (≤ 5 unidades)
+  const stock_critico = products
+    .filter((p) => Number(p.stock || 0) <= 5)
+    .map((p) => ({ nombre: p.nombre || p.name || '', stock: Number(p.stock || 0) }));
+
+  return {
+    kpis: { ingresos_hoy: ingresosHoy, ingresos_mes: ingresosMes, alumnos_activos: activos, alumnos_deudores: deudores },
+    graficas: { ventas_semana, asistencia_hora, alertas_caja: [], stock_critico },
+  };
+}
+
+const toSafeNumber = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const sanitizeKpisPayload = (payload = {}) => ({
+  ingresos_hoy: toSafeNumber(payload.ingresos_hoy),
+  ingresos_mes: toSafeNumber(payload.ingresos_mes),
+  alumnos_activos: Math.max(0, toSafeNumber(payload.alumnos_activos)),
+  alumnos_deudores: Math.max(0, toSafeNumber(payload.alumnos_deudores ?? payload.alumnos_morosos)),
+});
+
+const sanitizeGraficasPayload = (payload = {}) => ({
+  ventas_semana: ensureArray(payload.ventas_semana).map((item, index) => ({
+    fecha: item?.fecha || `dia-${index}`,
+    dia: item?.dia || '',
+    total: toSafeNumber(item?.total),
+  })),
+  asistencia_hora: ensureArray(payload.asistencia_hora).map((item, index) => ({
+    hora: item?.hora || `hora-${index}`,
+    total: Math.max(0, toSafeNumber(item?.total)),
+  })),
+  alertas_caja: ensureArray(payload.alertas_caja).map((item, index) => ({
+    id: item?.id ?? `alerta-${index}`,
+    fecha: item?.fecha || '',
+    usuario: item?.usuario || 'Sin usuario',
+    diferencia: toSafeNumber(item?.diferencia),
+  })),
+  stock_critico: ensureArray(payload.stock_critico).map((item, index) => ({
+    nombre: item?.nombre || `Producto ${index + 1}`,
+    stock: Math.max(0, toSafeNumber(item?.stock)),
+  })),
+});
+
 export function Dashboard() {
-  const [finanzas, setFinanzas] = useState({ hoy: 0, semana: 0, mes: 0, detalleHoyMembresias: 0, detalleHoyTienda: 0 });
-  const [totalAlumnos, setTotalAlumnos] = useState(0);
-  const [asistenciasHoy, setAsistenciasHoy] = useState(0);
-  const [transacciones, setTransacciones] = useState([]);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [kpis, setKpis] = useState(EMPTY_KPIS);
+  const [graficas, setGraficas] = useState(EMPTY_GRAFICAS);
+  const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState('');
 
   useEffect(() => {
-    calcularMetricas();
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+    let cancelled = false;
+
+    const loadAnalytics = async () => {
+      setLoading(true);
+      setErrorMessage('');
+
+      // ── REGLA 1: LECTURA LOCAL INMEDIATA ──────────────────────────────────
+      // Computa KPIs desde Dexie antes de intentar la red.
+      // Si Dexie tarda > 5 s (primer arranque, Safari lento), libera el spinner
+      // con zeros en lugar de bloquear la UI indefinidamente.
+      try {
+        const local = await Promise.race([
+          computeLocalStats(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('local stats timeout 5s')), 5000)
+          ),
+        ]);
+        if (!cancelled) {
+          setKpis({ ...EMPTY_KPIS, ...sanitizeKpisPayload(local.kpis) });
+          setGraficas({ ...EMPTY_GRAFICAS, ...sanitizeGraficasPayload(local.graficas) });
+          setLoading(false);  // Liberar spinner con datos locales ya visibles
+        }
+      } catch (localErr) {
+        console.warn('[Dashboard] Datos locales no disponibles:', localErr.message);
+        if (!cancelled) setLoading(false);
+      }
+
+      // ── REGLA 2: RED BEST-EFFORT (silenciada en fallo) ────────────────────
+      // Si el servidor responde, actualiza los KPIs con datos calculados server-side
+      // (más precisos que la estimación local). Si no responde, la UI ya tiene datos.
+      try {
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 4000);
+        let kpisResponse, graficasResponse;
+        try {
+          [kpisResponse, graficasResponse] = await Promise.all([
+            fetchApi('/api/analytics/kpis', { signal: controller.signal }),
+            fetchApi('/api/analytics/graficas', { signal: controller.signal }),
+          ]);
+        } finally {
+          clearTimeout(tid);
+        }
+
+        const kpisResult = await kpisResponse.json().catch(() => ({}));
+        const graficasResult = await graficasResponse.json().catch(() => ({}));
+
+        if (!kpisResponse.ok) throw buildHttpError('las métricas', kpisResponse, kpisResult);
+        if (!graficasResponse.ok) throw buildHttpError('las gráficas', graficasResponse, graficasResult);
+
+        if (!cancelled) {
+          setKpis({ ...EMPTY_KPIS, ...sanitizeKpisPayload(kpisResult.data || {}) });
+          setGraficas({ ...EMPTY_GRAFICAS, ...sanitizeGraficasPayload(graficasResult.data || {}) });
+          setErrorMessage('');
+        }
+      } catch (serverError) {
+        console.warn('[Dashboard] Sin servidor, mostrando datos locales:', serverError.message);
+        // Activar el banner "sin conexión" — los KPIs locales ya están visibles,
+        // pero el usuario debe saber que los números pueden estar desactualizados.
+        if (!cancelled) setErrorMessage('offline');
+      }
     };
+
+    loadAnalytics();
+    return () => { cancelled = true; };
   }, []);
 
-  const calcularMetricas = async () => {
-    const pagosMensualidades = (await db.payments.toArray()).map(normalizePaymentRecord);
-    const ventasTienda = await db.sales.toArray();
-    const totalPeleadores = await db.fighters.count();
-    const asistencias = await db.attendance.toArray();
-
-    const hoy = new Date();
-    const inicioDia = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
-    const inicioSemana = new Date(inicioDia);
-    const diaSemana = inicioSemana.getDay() || 7;
-    inicioSemana.setDate(inicioSemana.getDate() - diaSemana + 1);
-    const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
-
-    let sumHoy = 0;
-    let sumSemana = 0;
-    let sumMes = 0;
-    let ingresosMembresiaHoy = 0;
-    let ingresosTiendaHoy = 0;
-
-    pagosMensualidades.forEach((pago) => {
-      const fechaPago = new Date(pago.fecha_pago);
-      if (fechaPago >= inicioDia) {
-        sumHoy += pago.monto;
-        ingresosMembresiaHoy += pago.monto;
-      }
-      if (fechaPago >= inicioSemana) sumSemana += pago.monto;
-      if (fechaPago >= inicioMes) sumMes += pago.monto;
-    });
-
-    ventasTienda.forEach((venta) => {
-      const fechaVenta = new Date(venta.fecha || venta.date);
-      if (fechaVenta >= inicioDia) {
-        sumHoy += venta.total;
-        ingresosTiendaHoy += venta.total;
-      }
-      if (fechaVenta >= inicioSemana) sumSemana += venta.total;
-      if (fechaVenta >= inicioMes) sumMes += venta.total;
-    });
-
-    const hoyStr = hoy.toLocaleDateString();
-    const cuentaAsistencias = asistencias.filter((asistencia) => new Date(asistencia.fecha || asistencia.date).toLocaleDateString() === hoyStr).length;
-
-    const listaPagos = await Promise.all(pagosMensualidades.map(async (pago) => {
-      const fighter = normalizeFighterRecord(await db.fighters.where('matricula').equals(pago.peleador_matricula).first());
-      return {
-        id: `p_${pago.id}`,
-        categoria: 'MEMBRESIA',
-        concepto: pago.tipo_pago,
-        monto: pago.monto,
-        fecha: pago.fecha_pago,
-        metodo: pago.metodo_pago,
-        cliente: fighter?.matricula ? getFighterDisplayName(fighter) : 'Desconocido'
-      };
-    }));
-
-    const listaVentas = ventasTienda.map((venta) => ({
-      id: `s_${venta.id}`,
-      categoria: 'TIENDA / RENTA',
-      concepto: (venta.items || []).map((item) => `${item.nombre || item.name} (x${item.cantidad})`).join(', '),
-      monto: venta.total,
-      fecha: venta.fecha || venta.date,
-      metodo: venta.metodo_pago || venta.method,
-      cliente: venta.fighter_name || 'Venta general'
-    }));
-
-    const historialUnificado = [...listaPagos, ...listaVentas]
-      .sort((a, b) => new Date(b.fecha) - new Date(a.fecha))
-      .slice(0, 15);
-
-    setTransacciones(historialUnificado);
-    setFinanzas({
-      hoy: sumHoy,
-      semana: sumSemana,
-      mes: sumMes,
-      detalleHoyMembresias: ingresosMembresiaHoy,
-      detalleHoyTienda: ingresosTiendaHoy
-    });
-    setTotalAlumnos(totalPeleadores);
-    setAsistenciasHoy(cuentaAsistencias);
-  };
-
-  const formatoFechaHora = (isoString) => {
-    const fecha = new Date(isoString);
-    return `${fecha.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' })} - ${fecha.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
-  };
+  if (loading) {
+    return (
+      <div style={pageStyle}>
+        <div style={shellStyle}>
+          <p style={helperTextStyle}>Cargando métricas de negocio...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={pageStyle}>
       <div style={shellStyle}>
         <div style={headerStyle}>
           <div>
-            <h2 style={titleStyle}>Resumen General</h2>
-            <p style={subtitleStyle}>Vista rapida de ingresos, actividad y movimiento reciente.</p>
-          </div>
-          <div style={statusBadgeStyle}>
-            <span style={statusDotStyle(isOnline ? PALETTE.green : PALETTE.red)} />
-            {isOnline ? <FiWifi color={PALETTE.green} size={16} /> : <FiWifiOff color={PALETTE.red} size={16} />}
-            <span style={{ fontSize: '0.8rem', fontWeight: 700, color: isOnline ? PALETTE.green : PALETTE.red }}>
-              {isOnline ? 'Online' : 'Offline'}
-            </span>
+            <h2 style={titleStyle}>Panel de Control</h2>
+            <p style={subtitleStyle}>Visión financiera y operativa en tiempo real del gimnasio.</p>
           </div>
         </div>
-
-        <div style={summaryGridStyle}>
-          <div style={{ ...summaryCardStyle, gridColumn: 'span 2' }}>
-            <div style={summaryCardHeaderStyle}>
-              <div style={iconBoxStyle('rgba(255,127,39,0.12)', PALETTE.orange)}>
-                <FiActivity size={18} />
-              </div>
-              <div>
-                <p style={cardLabelStyle}>Ingresos de hoy</p>
-                <p style={amountStyle}>${finanzas.hoy.toLocaleString('en-US')}</p>
-              </div>
-            </div>
-
-            <div style={splitStatRowStyle}>
-              <div style={miniStatStyle}>
-                <span style={miniStatLabelStyle}>Membresias</span>
-                <strong style={miniStatValueStyle}>${finanzas.detalleHoyMembresias.toLocaleString('en-US')}</strong>
-              </div>
-              <div style={miniStatStyle}>
-                <span style={miniStatLabelStyle}>Tienda</span>
-                <strong style={miniStatValueStyle}>${finanzas.detalleHoyTienda.toLocaleString('en-US')}</strong>
-              </div>
-            </div>
+        {/* Banner offline suave — no bloquea el dashboard, los datos locales ya se muestran */}
+        {errorMessage && (
+          <div style={{ padding: '10px 14px', borderRadius: '10px', backgroundColor: '#fefce8', border: '1px solid #fde68a', color: '#92400e', fontSize: '0.84rem', fontWeight: 600 }}>
+            ⚠ Sin conexión al servidor — mostrando datos locales (pueden estar desactualizados).
           </div>
+        )}
 
-          <div style={summaryCardStyle}>
-            <div style={summaryCardHeaderStyle}>
-              <div style={iconBoxStyle('rgba(31,42,68,0.08)', PALETTE.dark)}>
-                <FiCalendar size={18} />
-              </div>
-              <div>
-                <p style={cardLabelStyle}>Esta semana</p>
-                <p style={compactAmountStyle}>${finanzas.semana.toLocaleString('en-US')}</p>
-              </div>
-            </div>
-          </div>
-
-          <div style={summaryCardStyle}>
-            <div style={summaryCardHeaderStyle}>
-              <div style={iconBoxStyle('rgba(0,187,45,0.1)', PALETTE.green)}>
-                <FiTrendingUp size={18} />
-              </div>
-              <div>
-                <p style={cardLabelStyle}>Este mes</p>
-                <p style={{ ...compactAmountStyle, color: PALETTE.green }}>${finanzas.mes.toLocaleString('en-US')}</p>
-              </div>
-            </div>
-          </div>
+        <div style={kpiGridStyle}>
+          <KpiCard
+            icon={<FiDollarSign size={20} />}
+            label="Ingresos de Hoy"
+            value={`$${formatCurrency(kpis.ingresos_hoy)}`}
+            iconBg="rgba(22, 163, 74, 0.1)"
+            iconColor="#16a34a"
+          />
+          <KpiCard
+            icon={<FiCalendar size={20} />}
+            label="Ingresos del Mes"
+            value={`$${formatCurrency(kpis.ingresos_mes)}`}
+          />
+          <KpiCard
+            icon={<FiUsers size={20} />}
+            label="Alumnos Activos"
+            value={String(kpis.alumnos_activos || 0)}
+          />
+          <KpiCard
+            icon={<FiActivity size={20} />}
+            label="Vencidos / Deudores"
+            value={String(kpis.alumnos_deudores || 0)}
+            valueColor={kpis.alumnos_deudores > 0 ? '#ef4444' : 'var(--primary-color)'}
+            iconBg={kpis.alumnos_deudores > 0 ? 'rgba(239, 68, 68, 0.1)' : 'rgba(255, 127, 39, 0.1)'}
+            iconColor={kpis.alumnos_deudores > 0 ? '#ef4444' : 'var(--secondary-color)'}
+          />
         </div>
 
-        <div style={detailGridStyle}>
-          <div style={sectionCardStyle}>
-            <div style={sectionHeaderStyle}>
-              <h3 style={sectionTitleStyle}>Actividad</h3>
-              <span style={sectionHintStyle}>Resumen del dia</span>
+        <div style={chartsGridStyle}>
+          <section style={panelStyle}>
+            <div style={panelHeaderStyle}>
+              <h3 style={panelTitleStyle}>Ingresos de los últimos 7 días</h3>
             </div>
+            <div style={chartWrapStyle}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={graficas.ventas_semana} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid stroke="#e2e8f0" vertical={false} strokeDasharray="4 4" />
+                  <XAxis dataKey="dia" stroke="#64748b" tickLine={false} axisLine={false} fontSize={12} tickMargin={12} />
+                  <YAxis stroke="#64748b" tickLine={false} axisLine={false} fontSize={12} tickFormatter={(value) => `$${value}`} />
+                  <Tooltip contentStyle={tooltipStyle} cursor={{ fill: '#f8fafc' }} formatter={(value) => [`$${formatCurrency(value)}`, 'Total']} />
+                  <Bar dataKey="total" fill="var(--secondary-color)" radius={[4, 4, 0, 0]} maxBarSize={45} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
 
-            <div style={metricStackStyle}>
-              <div style={metricCardStyle}>
-                <div style={metricIconWrapStyle('#eef2f5')}>
-                  <FiUsers size={18} color={PALETTE.dark} />
-                </div>
-                <div>
-                  <p style={metricTitleStyle}>Total peleadores</p>
-                  <p style={metricValueStyle}>{totalAlumnos}</p>
-                </div>
+          <section style={panelStyle}>
+            <div style={panelHeaderStyle}>
+              <h3 style={panelTitleStyle}>Horas Pico de Asistencia</h3>
+            </div>
+            <div style={chartWrapStyle}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={graficas.asistencia_hora} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid stroke="#e2e8f0" vertical={false} strokeDasharray="4 4" />
+                  <XAxis dataKey="hora" stroke="#64748b" tickLine={false} axisLine={false} fontSize={12} tickMargin={12} />
+                  <YAxis stroke="#64748b" tickLine={false} axisLine={false} fontSize={12} />
+                  <Tooltip contentStyle={tooltipStyle} cursor={{ stroke: '#cbd5e1', strokeWidth: 1, strokeDasharray: '4 4' }} formatter={(value) => [value, 'Personas']} />
+                  <Line type="monotone" dataKey="total" stroke="var(--primary-color)" strokeWidth={3} dot={{ fill: 'var(--primary-color)', r: 4, strokeWidth: 0 }} activeDot={{ r: 6, fill: 'var(--secondary-color)', stroke: '#fff', strokeWidth: 2 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+        </div>
+
+        <div style={chartsGridStyle}>
+          <section style={panelStyle}>
+            <div style={panelHeaderStyle}>
+              <h3 style={panelTitleStyle}>Alerta de Inventario Crítico</h3>
+              <div style={{ ...alertChipStyle, backgroundColor: '#fff7ed', color: '#c2410c' }}>
+                <FiPackage size={14} />
+                {graficas.stock_critico?.length || 0} productos
               </div>
+            </div>
 
-              <div style={metricCardStyle}>
-                <div style={metricIconWrapStyle('#eafaf1')}>
-                  <FiCheckCircle size={18} color={PALETTE.green} />
-                </div>
-                <div>
-                  <p style={metricTitleStyle}>Asistencias hoy</p>
-                  <p style={metricValueStyle}>{asistenciasHoy}</p>
-                </div>
+            {!graficas.stock_critico || graficas.stock_critico.length === 0 ? (
+              <div style={emptyStateStyle}>Tu tienda tiene stock suficiente.</div>
+            ) : (
+              <div style={tableWrapStyle}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      <th style={thStyle}>Producto</th>
+                      <th style={{ ...thStyle, textAlign: 'right' }}>Stock Restante</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {graficas.stock_critico.map((item, idx) => (
+                      <tr key={idx} style={rowStyle}>
+                        <td style={tdStyle}>{item.nombre}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right', color: '#ef4444', fontWeight: 800 }}>
+                          {item.stock}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section style={panelStyle}>
+            <div style={panelHeaderStyle}>
+              <h3 style={panelTitleStyle}>Descuadres de Caja (Últimos 7 días)</h3>
+              <div style={{ ...alertChipStyle, backgroundColor: '#fef2f2', color: '#dc2626' }}>
+                <FiAlertTriangle size={14} />
+                {graficas.alertas_caja?.length || 0} alertas
               </div>
             </div>
-          </div>
 
-          <div style={sectionCardStyle}>
-            <div style={sectionHeaderStyle}>
-              <h3 style={sectionTitleStyle}>Ultimos ingresos</h3>
-              <span style={sectionHintStyle}>{transacciones.length} movimientos</span>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              {transacciones.length === 0 ? (
-                <p style={emptyTextStyle}>Aun no hay ingresos registrados.</p>
-              ) : (
-                transacciones.map((tx, index) => (
-                  <div key={tx.id} style={{ ...transactionRowStyle, borderBottom: index === transacciones.length - 1 ? 'none' : `1px solid ${PALETTE.grayBorder}` }}>
-                    <div style={transactionLeadStyle}>
-                      <div style={transactionIconStyle(tx.categoria === 'MEMBRESIA')}>
-                        {tx.categoria === 'MEMBRESIA' ? <FiUserCheck size={15} /> : <FiShoppingCart size={15} />}
-                      </div>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={transactionTitleStyle}>{tx.concepto}</div>
-                        <div style={transactionSubtitleStyle}>{tx.cliente}</div>
-                      </div>
-                    </div>
-
-                    <div style={transactionMetaStyle}>
-                      <div style={transactionDateStyle}>{formatoFechaHora(tx.fecha)}</div>
-                      <div style={methodPillStyle}>
-                        <FiCreditCard size={10} />
-                        {tx.metodo}
-                      </div>
-                    </div>
-
-                    <div style={transactionAmountStyle}>+${Number(tx.monto || 0).toLocaleString('en-US')}</div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+            {!graficas.alertas_caja || graficas.alertas_caja.length === 0 ? (
+              <div style={emptyStateStyle}>Cortes de caja perfectos. No hay descuadres.</div>
+            ) : (
+              <div style={tableWrapStyle}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      <th style={thStyle}>Fecha</th>
+                      <th style={thStyle}>Usuario</th>
+                      <th style={{ ...thStyle, textAlign: 'right' }}>Diferencia</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {graficas.alertas_caja.map((alerta) => (
+                      <tr key={alerta.id} style={rowStyle}>
+                        <td style={{ ...tdStyle, fontSize: '0.85rem' }}>{formatDateTime(alerta.fecha)}</td>
+                        <td style={tdStyle}>{alerta.usuario}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right', color: Number(alerta.diferencia || 0) < 0 ? '#ef4444' : '#16a34a', fontWeight: 800 }}>
+                          {Number(alerta.diferencia || 0) > 0 ? '+' : ''}${formatCurrency(alerta.diferencia)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
         </div>
       </div>
     </div>
   );
 }
 
-const pageStyle = { padding: '3vh 3vw', backgroundColor: PALETTE.grayBg, minHeight: '100vh', fontFamily: 'sans-serif' };
-const shellStyle = { maxWidth: '1120px', margin: '0 auto' };
-const headerStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '22px', flexWrap: 'wrap', gap: '12px' };
-const titleStyle = { color: PALETTE.dark, fontSize: '1.5rem', fontWeight: 700, margin: 0 };
-const subtitleStyle = { margin: '6px 0 0 0', color: '#667085', fontSize: '0.92rem' };
-const statusBadgeStyle = { display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '7px 12px', backgroundColor: PALETTE.white, borderRadius: '999px', border: `1px solid ${PALETTE.grayBorder}` };
-const statusDotStyle = (color) => ({ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: color });
-const summaryGridStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px', marginBottom: '18px' };
-const summaryCardStyle = { backgroundColor: PALETTE.white, borderRadius: '14px', border: `1px solid ${PALETTE.grayBorder}`, padding: '18px', boxShadow: '0 3px 12px rgba(15,23,42,0.03)' };
-const summaryCardHeaderStyle = { display: 'flex', alignItems: 'center', gap: '12px' };
-const iconBoxStyle = (bgColor, color) => ({ backgroundColor: bgColor, color, width: '42px', height: '42px', borderRadius: '10px', display: 'flex', justifyContent: 'center', alignItems: 'center', flexShrink: 0 });
-const cardLabelStyle = { margin: 0, fontSize: '0.8rem', color: '#667085', fontWeight: 700 };
-const amountStyle = { margin: '4px 0 0 0', fontSize: '2rem', fontWeight: 800, color: PALETTE.dark, letterSpacing: '-0.5px' };
-const compactAmountStyle = { margin: '4px 0 0 0', fontSize: '1.35rem', fontWeight: 800, color: PALETTE.dark };
-const splitStatRowStyle = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginTop: '16px' };
-const miniStatStyle = { padding: '10px 12px', borderRadius: '10px', backgroundColor: '#f8fafc', border: `1px solid ${PALETTE.grayBorder}` };
-const miniStatLabelStyle = { display: 'block', fontSize: '0.74rem', color: '#667085', marginBottom: '4px' };
-const miniStatValueStyle = { fontSize: '0.95rem', color: PALETTE.dark };
-const detailGridStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '18px' };
-const sectionCardStyle = { backgroundColor: PALETTE.white, borderRadius: '14px', border: `1px solid ${PALETTE.grayBorder}`, padding: '18px', boxShadow: '0 3px 12px rgba(15,23,42,0.03)' };
-const sectionHeaderStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginBottom: '14px', paddingBottom: '12px', borderBottom: `1px solid ${PALETTE.grayBorder}` };
-const sectionTitleStyle = { margin: 0, fontSize: '1rem', color: PALETTE.dark, fontWeight: 700 };
-const sectionHintStyle = { fontSize: '0.76rem', color: '#667085', fontWeight: 700 };
-const metricStackStyle = { display: 'grid', gap: '12px' };
-const metricCardStyle = { display: 'flex', alignItems: 'center', gap: '14px', backgroundColor: '#fcfcfd', padding: '14px', borderRadius: '12px', border: `1px solid ${PALETTE.grayBorder}` };
-const metricIconWrapStyle = (bgColor) => ({ width: '42px', height: '42px', borderRadius: '10px', backgroundColor: bgColor, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 });
-const metricTitleStyle = { margin: 0, color: '#667085', fontSize: '0.8rem', fontWeight: 700 };
-const metricValueStyle = { margin: '3px 0 0 0', fontSize: '1.5rem', fontWeight: 800, color: PALETTE.dark };
-const emptyTextStyle = { textAlign: 'center', color: '#667085', padding: '18px 0', margin: 0 };
-const transactionRowStyle = { display: 'grid', gridTemplateColumns: 'minmax(0, 1.5fr) auto auto', alignItems: 'center', gap: '14px', padding: '12px 4px' };
-const transactionLeadStyle = { display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 };
-const transactionIconStyle = (isMembership) => ({ width: '34px', height: '34px', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: isMembership ? '#eafaf1' : '#fff7ed', color: isMembership ? PALETTE.green : '#d97706', flexShrink: 0 });
-const transactionTitleStyle = { fontWeight: 700, color: PALETTE.dark, fontSize: '0.9rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' };
-const transactionSubtitleStyle = { fontSize: '0.78rem', color: '#667085', marginTop: '3px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' };
-const transactionMetaStyle = { textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' };
-const transactionDateStyle = { fontSize: '0.76rem', color: '#667085', fontWeight: 700 };
-const methodPillStyle = { display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.68rem', backgroundColor: '#f4f4f5', padding: '3px 8px', borderRadius: '999px', fontWeight: 700, color: PALETTE.dark };
-const transactionAmountStyle = { fontSize: '1rem', fontWeight: 800, color: PALETTE.dark, textAlign: 'right', minWidth: '86px' };
+function KpiCard({
+  icon,
+  label,
+  value,
+  valueColor = 'var(--primary-color)',
+  iconBg = 'rgba(255, 127, 39, 0.1)',
+  iconColor = 'var(--secondary-color)',
+}) {
+  return (
+    <div style={kpiCardStyle}>
+      <div style={{ ...kpiIconStyle, backgroundColor: iconBg, color: iconColor }}>{icon}</div>
+      <div>
+        <div style={kpiLabelStyle}>{label}</div>
+        <div style={{ ...kpiValueStyle, color: valueColor }}>{value}</div>
+      </div>
+    </div>
+  );
+}
+
+function formatCurrency(value) {
+  return Number(value || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatDateTime(value) {
+  if (!value) return 'Sin fecha';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'Sin fecha';
+  }
+  return `${date.toLocaleDateString('es-MX')} ${date.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+// --- ESTILOS CON TIPOGRAFÍA UNIFICADA ---
+// Se ha añadido la familia tipográfica 'Inter' al contenedor principal (pageStyle)
+const pageStyle = { 
+  padding: '3vh 2vw', 
+  backgroundColor: '#f8fafc', 
+  minHeight: '85vh',
+  fontFamily: "'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" 
+};
+
+const shellStyle = { maxWidth: '1280px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '28px' };
+const headerStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' };
+const titleStyle = { margin: 0, color: 'var(--primary-color)', fontSize: '1.7rem', fontWeight: 900, letterSpacing: '-0.5px' };
+const subtitleStyle = { margin: '6px 0 0 0', color: '#64748b', fontSize: '0.95rem' };
+const helperTextStyle = { margin: 0, color: '#64748b', fontSize: '0.95rem' };
+
+const kpiGridStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '20px' };
+const kpiCardStyle = { backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '22px', boxShadow: '0 2px 10px rgba(15, 23, 42, 0.03)', display: 'flex', alignItems: 'center', gap: '16px' };
+const kpiIconStyle = { width: '54px', height: '54px', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
+const kpiLabelStyle = { color: '#64748b', fontSize: '0.8rem', fontWeight: 700, marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' };
+const kpiValueStyle = { fontSize: '1.6rem', fontWeight: 800, lineHeight: 1 };
+
+const chartsGridStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: '24px' };
+const panelStyle = { backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '24px', boxShadow: '0 2px 10px rgba(15, 23, 42, 0.03)', display: 'flex', flexDirection: 'column' };
+const panelHeaderStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '24px', paddingBottom: '16px', borderBottom: '1px solid #f1f5f9' };
+const panelTitleStyle = { margin: 0, color: 'var(--primary-color)', fontSize: '1.1rem', fontWeight: 800 };
+const chartWrapStyle = { width: '100%', height: '280px', minHeight: '280px', flex: 1 };
+const tooltipStyle = { backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', color: 'var(--primary-color)', boxShadow: '0 4px 12px rgba(0, 0, 0, 0.08)', fontWeight: 600 };
+const alertChipStyle = { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', fontWeight: 800, padding: '6px 12px', borderRadius: '999px' };
+const tableWrapStyle = { overflowX: 'auto' };
+const tableStyle = { width: '100%', borderCollapse: 'collapse' };
+const thStyle = { textAlign: 'left', padding: '12px 10px', color: '#64748b', fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '2px solid #f1f5f9', fontWeight: 700 };
+const rowStyle = { borderBottom: '1px solid #f8fafc', transition: 'background-color 0.15s', ':hover': { backgroundColor: '#f8fafc' } };
+const tdStyle = { padding: '14px 10px', color: 'var(--primary-color)', fontSize: '0.95rem', fontWeight: 600 };
+const emptyStateStyle = { padding: '30px 0', textAlign: 'center', color: '#94a3b8', fontSize: '0.95rem', fontStyle: 'italic' };

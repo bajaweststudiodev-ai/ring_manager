@@ -2,9 +2,42 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import SignatureCanvas from 'react-signature-canvas';
 import jsPDF from 'jspdf';
-import { FiMapPin, FiSmartphone } from 'react-icons/fi';
+import { FiCamera, FiMapPin, FiRefreshCw, FiSave, FiSmartphone, FiX } from 'react-icons/fi';
 import { fetchApi } from '../config/api';
-import { getFighterDisplayName, normalizeFighterRecord } from '../db/db';
+import { addFighterFull, getFighterDisplayName, normalizeFighterRecord } from '../db/db';
+import { obtenerPlanesPermitidos, TARIFAS, calcularMontoProporcional } from '../utils/finanzas';
+import { parseDateLocal } from '../utils/date';
+
+const INITIAL_FORM_DATA = {
+  nombres: '',
+  apellidoPaterno: '',
+  apellidoMaterno: '',
+  fechaNacimiento: '',
+  direccion: '',
+  numeroCasa: '',
+  colonia: '',
+  codigoPostal: '',
+  ciudad: '',
+  telefono: '',
+  email: '',
+  emergNombre: '',
+  emergTelefono: '',
+  tutorNombres: '',
+  tutorApellidoPaterno: '',
+  tutorApellidoMaterno: '',
+  tutorTelefono: '',
+  tutorCorreo: '',
+  tutorFechaNacimiento: '',
+  sistemaSalud: 'NO TENGO',
+  consultorio: '',
+  alergias: '',
+  lesiones: '',
+  tratamientos: '',
+  grupoSanguineo: 'NO SABE',
+  tipoMembresia: obtenerPlanesPermitidos(true)[0].id,
+  fotoPerfil: null,
+  aceptoTerminos: false,
+};
 
 export function RegisterFighter({ gymContext = null, publicMode = false }) {
   const [step, setStep] = useState(1);
@@ -12,40 +45,26 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
   const [coloniasDisponibles, setColoniasDisponibles] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [serverMessage, setServerMessage] = useState('');
+  const [cameraModalOpen, setCameraModalOpen] = useState(false);
+  const [capturedPreview, setCapturedPreview] = useState(null);
+  const [firmaGenerada, setFirmaGenerada] = useState('');
   const webcamRef = useRef(null);
   const sigPad = useRef(null);
 
-  const [formData, setFormData] = useState({
-    nombres: '',
-    apellidoPaterno: '',
-    apellidoMaterno: '',
-    fechaNacimiento: '',
-    direccion: '',
-    numeroCasa: '',
-    colonia: '',
-    codigoPostal: '',
-    ciudad: '',
-    telefono: '',
-    email: '',
-    emergNombre: '',
-    emergTelefono: '',
-    tutorNombres: '',
-    tutorApellidoPaterno: '',
-    tutorApellidoMaterno: '',
-    tutorTelefono: '',
-    tutorCorreo: '',
-    tutorFechaNacimiento: '',
-    sistemaSalud: 'NO TENGO',
-    consultorio: '',
-    alergias: '',
-    lesiones: '',
-    tratamientos: '',
-    grupoSanguineo: 'NO SABE',
-    tipoMembresia: 'MENSUALIDAD + INSCRIPCION',
-    fotoPerfil: null,
-    aceptoTerminos: false
-  });
+  const [formData, setFormData] = useState({ ...INITIAL_FORM_DATA });
 
+  const obtenerPrecioActual = () => {
+    const tipo = formData.tipoMembresia;
+    if (tipo === 'MENSUALIDAD + INSCRIPCION') return TARIFAS.MENSUALIDAD + TARIFAS.INSCRIPCION;
+    if (tipo === 'PROPORCIONAL + INSCRIPCION') return calcularMontoProporcional() + TARIFAS.INSCRIPCION;
+    if (tipo === 'MENSUALIDAD') return TARIFAS.MENSUALIDAD;
+    if (tipo === 'PROPORCIONAL') return calcularMontoProporcional();
+    if (tipo === 'DOS SEMANAS') return TARIFAS.DOS_SEMANAS;
+    if (tipo === 'SEMANA') return TARIFAS.SEMANA;
+    if (tipo === 'VISITA') return TARIFAS.VISITA;
+    return 0;
+  };
+  
   useEffect(() => {
     if (!publicMode) {
       document.title = "Ring Manager";
@@ -115,7 +134,7 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
 
   const esMenorDeEdad = useMemo(() => {
     if (!formData.fechaNacimiento) return false;
-    const birthDate = new Date(formData.fechaNacimiento);
+    const birthDate = parseDateLocal(formData.fechaNacimiento);
     const today = new Date();
     let age = today.getFullYear() - birthDate.getFullYear();
     const monthDiff = today.getMonth() - birthDate.getMonth();
@@ -171,16 +190,104 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
     return true;
   };
 
+  // --- MAGIA DE RECORTAR Y COMPRIMIR LA FOTO ---
   const capturarFoto = () => {
     if (!webcamRef.current) return;
     const imageSrc = webcamRef.current.getScreenshot();
-    setFormData((prev) => ({ ...prev, fotoPerfil: imageSrc }));
+    if (!imageSrc) return;
+
+    const img = new Image();
+    img.onload = () => {
+      // Creamos un lienzo (canvas) tamaño foto de perfil (400x400)
+      const canvas = document.createElement('canvas');
+      const targetSize = 400;
+      canvas.width = targetSize;
+      canvas.height = targetSize;
+      const ctx = canvas.getContext('2d');
+
+      // Calculamos cómo recortar el centro exacto de la cámara
+      const size = Math.min(img.width, img.height);
+      const x = (img.width - size) / 2;
+      const y = (img.height - size) / 2;
+
+      // Dibujamos solo el recorte centrado en el lienzo
+      ctx.drawImage(img, x, y, size, size, 0, 0, targetSize, targetSize);
+
+      // Comprimimos a JPEG con 70% de calidad (Reduce de 5MB a ~30KB)
+      const compressedSrc = canvas.toDataURL('image/jpeg', 0.7);
+      setCapturedPreview(compressedSrc);
+    };
+    img.src = imageSrc;
+  };
+
+  const abrirModalCamara = () => {
+    setCapturedPreview(formData.fotoPerfil || null);
+    setCameraModalOpen(true);
+  };
+
+  const guardarFotoTomada = () => {
+    if (!capturedPreview) {
+      return;
+    }
+
+    setFormData((prev) => ({ ...prev, fotoPerfil: capturedPreview }));
+    setCameraModalOpen(false);
   };
 
   const limpiarFirma = () => {
     if (sigPad.current) {
       sigPad.current.clear();
     }
+    setFirmaGenerada('');
+  };
+
+  const obtenerFirmaDataUrl = ({ preferCurrentCanvas = false } = {}) => {
+    const puedeLeerCanvas = (
+      sigPad.current
+      && typeof sigPad.current.isEmpty === 'function'
+      && !sigPad.current.isEmpty()
+      && typeof sigPad.current.getCanvas === 'function'
+    );
+
+    if (puedeLeerCanvas && preferCurrentCanvas) {
+      try {
+        return sigPad.current.getCanvas().toDataURL('image/png');
+      } catch (error) {
+        console.warn('No pude extraer la firma desde el canvas actual.', error);
+      }
+    }
+
+    if (firmaGenerada) {
+      return firmaGenerada;
+    }
+
+    if (puedeLeerCanvas) {
+      try {
+        return sigPad.current.getCanvas().toDataURL('image/png');
+      } catch (error) {
+        console.warn('No pude extraer la firma del canvas.', error);
+      }
+    }
+
+    return '';
+  };
+
+  const guardarFirmaActual = () => {
+    const siguienteFirma = obtenerFirmaDataUrl({ preferCurrentCanvas: true });
+    if (siguienteFirma) {
+      setFirmaGenerada(siguienteFirma);
+    }
+  };
+
+  const reiniciarFormulario = () => {
+    limpiarFirma();
+    setStep(1);
+    setFormData({ ...INITIAL_FORM_DATA });
+    setColoniasDisponibles([]);
+    setCapturedPreview(null);
+    setCameraModalOpen(false);
+    setServerMessage('');
+    setMatriculaGenerada(null);
   };
 
   const construirPayload = (matricula, firmaData) => {
@@ -217,6 +324,28 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
     };
   };
 
+  const uploadFighterPhoto = async (matricula) => {
+    if (!formData.fotoPerfil) {
+      return '';
+    }
+
+    const response = await fetchApi('/api/uploads/foto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        matricula,
+        foto_data_url: formData.fotoPerfil,
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(result.message || 'No pude guardar la fotografia en el servidor.');
+    }
+
+    return result?.data?.foto_path || '';
+  };
+
   const handleGuardarFinal = async () => {
     if (!formData.fotoPerfil) {
       alert('Debes tomar la foto de perfil.');
@@ -235,11 +364,32 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
     setServerMessage('');
 
     try {
-      const firmaData = sigPad.current.getCanvas().toDataURL('image/png');
-      const nuevaMatricula = generarMatriculaUnica();
-      const payload = construirPayload(nuevaMatricula, firmaData);
+      const firmaData = obtenerFirmaDataUrl({ preferCurrentCanvas: true });
+      if (!firmaData) {
+        throw new Error('No pude capturar la firma. Intenta firmar de nuevo.');
+      }
 
+      const nuevaMatricula = generarMatriculaUnica();
+
+      // 1. GUARDAR EN DEXIE PRIMERO — foto queda como data URL, synced: 0
+      await addFighterFull({
+        ...construirPayload(nuevaMatricula, firmaData),
+        foto_path: '',
+        foto_data_url: formData.fotoPerfil,
+        fotoPerfil: formData.fotoPerfil,
+        estado: 'PENDIENTE',
+      });
+
+      // 2. INTENTAR SUBIR FOTO Y REGISTRAR EN SERVIDOR (best-effort)
       try {
+        const fotoPath = await uploadFighterPhoto(nuevaMatricula);
+        const payload = {
+          ...construirPayload(nuevaMatricula, firmaData),
+          foto_path: fotoPath,
+          foto_data_url: '',
+          tipo_pago_sugerido: '',  // vacío: el cobro ocurre en Pendientes, no en el registro
+        };
+
         const response = await fetchApi('/api/registro', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -248,30 +398,23 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
 
         const responseText = await response.text();
         let result = {};
-        try {
-          result = responseText ? JSON.parse(responseText) : {};
-        } catch {
-          result = {};
-        }
+        try { result = responseText ? JSON.parse(responseText) : {}; } catch { result = {}; }
 
         if (!response.ok) {
-          throw new Error(
-            result.message
-            || responseText
-            || `No pude guardar el registro en el servidor. Codigo ${response.status}.`
-          );
+          throw new Error(result.message || responseText || `Error ${response.status}`);
         }
-        setServerMessage('Solicitud enviada correctamente. El entrenador la guardara en el sistema al confirmar el pago.');
-      } catch (error) {
-        console.warn('No pude enviar la solicitud a Flask.', error);
-        throw error;
+        setServerMessage('Solicitud enviada al servidor. El entrenador la activará al confirmar el pago.');
+      } catch (serverError) {
+        console.warn('[RegisterFighter] DEBUG servidor no disponible:', serverError.message);
+        setServerMessage('Sin conexión: registro guardado localmente. Se sincronizará cuando haya internet.');
       }
 
+      setFirmaGenerada(firmaData);
       setMatriculaGenerada(nuevaMatricula);
       setStep(formSteps.length + 1);
     } catch (error) {
-      console.error('Error al guardar el registro:', error);
-      alert(error.message || 'Ocurrio un error al guardar el registro.');
+      console.error('[RegisterFighter] DEBUG CREACIÓN FALLIDA:', error);
+      alert('Error al guardar: ' + error.message);
     } finally {
       setIsSubmitting(false);
     }
@@ -303,7 +446,7 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
     doc.setTextColor(0, 0, 0);
     doc.text(`Matricula: ${matriculaGenerada}`, 20, 50);
     doc.text(`Nombre: ${nombreCompleto}`, 20, 58);
-    doc.text(`Fecha nacimiento: ${formData.fechaNacimiento}`, 20, 66);
+    doc.text(`Fecha: ${new Date().toLocaleDateString('es-MX')}`, 20, 66);
     doc.text(`Membresia: ${formData.tipoMembresia}`, 20, 74);
     doc.text(`Telefono: ${formData.telefono}`, 20, 82);
     doc.text(`Ciudad: ${formData.ciudad} (CP: ${formData.codigoPostal})`, 20, 90);
@@ -337,18 +480,53 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
 
     doc.setFont(undefined, 'normal');
     doc.setFontSize(8);
+    const contractStartY = 182;
     const contratoLineas = doc.splitTextToSize(getContratoLegal(), 170);
-    doc.text(contratoLineas, 20, 182);
+    doc.text(contratoLineas, 20, contractStartY);
 
-    if (!sigPad.current?.isEmpty()) {
-      const firmaData = sigPad.current.getCanvas().toDataURL('image/png');
-      doc.addImage(firmaData, 'PNG', 70, 240, 70, 25);
-      doc.line(70, 265, 140, 265);
-      doc.setFontSize(10);
-      doc.text(esMenorDeEdad ? 'FIRMA DEL TUTOR' : 'FIRMA DE CONFORMIDAD', 105, 270, null, null, 'center');
+    const firmaData = obtenerFirmaDataUrl();
+    if (firmaData) {
+      try {
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const contractHeight = doc.getTextDimensions(contratoLineas).h || (contratoLineas.length * 4);
+        let signatureY = contractStartY + contractHeight + 14;
+        const signatureHeight = 25;
+        const signatureLabelY = signatureY + signatureHeight + 5;
+
+        if (signatureLabelY > pageHeight - 12) {
+          doc.addPage();
+          signatureY = 30;
+          doc.setFont(undefined, 'bold');
+          doc.setFontSize(12);
+          doc.text('FIRMA', 20, 20);
+          doc.setFont(undefined, 'normal');
+        }
+
+        doc.addImage(firmaData, 'PNG', 70, signatureY, 70, signatureHeight);
+        doc.line(70, signatureY + signatureHeight, 140, signatureY + signatureHeight);
+        doc.setFontSize(10);
+        doc.text(
+          esMenorDeEdad ? 'FIRMA DEL TUTOR' : 'FIRMA DE CONFORMIDAD',
+          105,
+          signatureY + signatureHeight + 5,
+          null,
+          null,
+          'center',
+        );
+      } catch (error) {
+        console.warn('No se pudo insertar la firma en el PDF', error);
+      }
     }
 
-    doc.save(`Contrato_${matriculaGenerada}_${formData.nombres}.pdf`);
+    const safeName = nombreCompleto
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      || matriculaGenerada
+      || 'Peleador';
+
+    doc.save(`Contrato_${safeName}.pdf`);
   };
 
   const getContratoLegal = () => {
@@ -380,21 +558,21 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
   const renderStep1 = () => (
     <div className="fade-in">
       <h3 style={stepTitleStyle}>PASO 1: DATOS PERSONALES</h3>
-      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr 1fr' }}>
+      <div style={gridResponsive}>
         <Input label="NOMBRE(S) *" name="nombres" val={formData.nombres} onChange={handleChange} />
         <Input label="APELLIDO PATERNO *" name="apellidoPaterno" val={formData.apellidoPaterno} onChange={handleChange} />
         <Input label="APELLIDO MATERNO" name="apellidoMaterno" val={formData.apellidoMaterno} onChange={handleChange} />
       </div>
 
-      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', width: '100%', marginBottom: '22px' }}>
         <Input label="FECHA DE NACIMIENTO *" name="fechaNacimiento" type="date" val={formData.fechaNacimiento} onChange={handleChange} />
-        <Input label="TELEFONO MOVIL *" name="telefono" type="number" val={formData.telefono} onChange={handleChange} ph="10 digitos" />
+        <Input label="TELEFONO MOVIL *" name="telefono" type="tel" val={formData.telefono} onChange={handleChange} ph="10 digitos" inputMode="numeric" pattern="[0-9]*" />
       </div>
 
       <h4 style={sectionSubtitleStyle}>DOMICILIO</h4>
       <div style={gridResponsive}>
-        <Input label="C.P. *" name="codigoPostal" type="number" val={formData.codigoPostal} onChange={handleChange} ph="Ej. 22800" />
-        <div>
+        <Input label="C.P. *" name="codigoPostal" type="tel" val={formData.codigoPostal} onChange={handleChange} ph="Ej. 22800" inputMode="numeric" pattern="[0-9]*" />
+        <div style={{ width: '100%' }}>
           <label style={labelStyle}>COLONIA *</label>
           {coloniasDisponibles.length > 0 ? (
             <select name="colonia" value={formData.colonia} onChange={handleChange} style={inputStyle}>
@@ -408,7 +586,7 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
         </div>
       </div>
 
-      <div style={{ ...gridResponsive, gridTemplateColumns: '2fr 1fr 1fr' }}>
+      <div style={gridResponsive}>
         <Input label="CALLE *" name="direccion" val={formData.direccion} onChange={handleChange} />
         <Input label="NUMERO *" name="numeroCasa" val={formData.numeroCasa} onChange={handleChange} />
         <Input label="CIUDAD *" name="ciudad" val={formData.ciudad} onChange={handleChange} />
@@ -416,7 +594,7 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
 
       <div style={gridResponsive}>
         <Input label="CORREO" name="email" type="email" val={formData.email} onChange={handleChange} />
-        <div>
+        <div style={{ width: '100%' }}>
           <label style={labelStyle}>GRUPO SANGUINEO</label>
           <select name="grupoSanguineo" value={formData.grupoSanguineo} onChange={handleChange} style={inputStyle}>
             <option value="NO SABE">NO SABE</option>
@@ -435,7 +613,7 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
       <h4 style={sectionSubtitleStyle}>CONTACTO DE EMERGENCIA</h4>
       <div style={gridResponsive}>
         <Input label="NOMBRE COMPLETO" name="emergNombre" val={formData.emergNombre} onChange={handleChange} />
-        <Input label="TELEFONO" name="emergTelefono" type="number" val={formData.emergTelefono} onChange={handleChange} />
+        <Input label="TELEFONO" name="emergTelefono" type="tel" val={formData.emergTelefono} onChange={handleChange} inputMode="numeric" pattern="[0-9]*" />
       </div>
     </div>
   );
@@ -446,13 +624,13 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
       <div style={warningBoxStyle}>
         Necesito la informacion del tutor porque el peleador es menor de edad.
       </div>
-      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr 1fr' }}>
+      <div style={gridResponsive}>
         <Input label="NOMBRE(S) *" name="tutorNombres" val={formData.tutorNombres} onChange={handleChange} />
         <Input label="APELLIDO PATERNO *" name="tutorApellidoPaterno" val={formData.tutorApellidoPaterno} onChange={handleChange} />
         <Input label="APELLIDO MATERNO" name="tutorApellidoMaterno" val={formData.tutorApellidoMaterno} onChange={handleChange} />
       </div>
-      <div style={{ ...gridResponsive, gridTemplateColumns: '1fr 1fr 1fr' }}>
-        <Input label="TELEFONO *" name="tutorTelefono" type="number" val={formData.tutorTelefono} onChange={handleChange} />
+      <div style={gridResponsive}>
+        <Input label="TELEFONO *" name="tutorTelefono" type="tel" val={formData.tutorTelefono} onChange={handleChange} inputMode="numeric" pattern="[0-9]*" />
         <Input label="CORREO" name="tutorCorreo" type="email" val={formData.tutorCorreo} onChange={handleChange} />
         <Input label="FECHA DE NACIMIENTO *" name="tutorFechaNacimiento" type="date" val={formData.tutorFechaNacimiento} onChange={handleChange} />
       </div>
@@ -463,7 +641,7 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
     <div className="fade-in">
       <h3 style={stepTitleStyle}>EXPEDIENTE MEDICO</h3>
       <div style={gridResponsive}>
-        <div>
+        <div style={{ width: '100%' }}>
           <label style={labelStyle}>SISTEMA DE SALUD</label>
           <select name="sistemaSalud" value={formData.sistemaSalud} onChange={handleChange} style={inputStyle}>
             <option value="NO TENGO">NO TENGO</option>
@@ -486,34 +664,40 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
   const renderStepContrato = () => (
     <div className="fade-in">
       <h3 style={stepTitleStyle}>FOTO Y CONTRATO</h3>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '32px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '32px' }}>
         <div>
           <label style={labelStyle}>FOTO DEL PELEADOR *</label>
-          <div style={cameraBoxStyle}>
-            {formData.fotoPerfil ? (
-              <img src={formData.fotoPerfil} alt="Perfil" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            ) : (
-              <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" videoConstraints={{ facingMode: 'user' }} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            )}
+          <div style={photoCardStyle}>
+            <div style={cameraBoxStyle}>
+              {formData.fotoPerfil ? (
+                <img src={formData.fotoPerfil} alt="Perfil" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              ) : (
+                <div style={cameraPlaceholderStyle}>
+                  <FiCamera size={28} />
+                  <span>Aun no hay fotografia guardada</span>
+                </div>
+              )}
+            </div>
+            <button onClick={abrirModalCamara} type="button" style={secondaryButtonStyle}>
+              <FiCamera size={15} />
+              Tomar Fotografia
+            </button>
           </div>
-          <button onClick={formData.fotoPerfil ? () => setFormData((prev) => ({ ...prev, fotoPerfil: null })) : capturarFoto} style={secondaryButtonStyle}>
-            {formData.fotoPerfil ? 'Tomar otra foto' : 'Capturar foto'}
-          </button>
-
           <div style={{ marginTop: '16px' }}>
             <label style={labelStyle}>TIPO DE MEMBRESIA *</label>
             <select name="tipoMembresia" value={formData.tipoMembresia} onChange={handleChange} style={inputStyle}>
-              <option value="MENSUALIDAD + INSCRIPCION">MENSUALIDAD + INSCRIPCION</option>
-              <option value="PROPORCIONAL + INSCRIPCION">PROPORCIONAL + INSCRIPCION</option>
-              <option value="MENSUALIDAD">MENSUALIDAD</option>
-              <option value="DOS SEMANAS">DOS SEMANAS</option>
-              <option value="SEMANA">SEMANA</option>
-              <option value="VISITA">VISITA</option>
+              {obtenerPlanesPermitidos(true).map(plan => (
+                <option key={plan.id} value={plan.id}>{plan.nombre}</option>
+              ))}
             </select>
+            {/* 🔥 EL PRECIO DISCRETO */}
+            <div style={{ textAlign: 'right', marginTop: '6px', fontSize: '0.8rem', color: '#667085', fontWeight: 600 }}>
+              Pago en recepción: <span style={{ color: 'var(--primary-color)', fontSize: '0.9rem', fontWeight: 800 }}>${obtenerPrecioActual()} MXN</span>
+            </div>
           </div>
         </div>
 
-        <div>
+        <div style={{ width: '100%' }}>
           <label style={labelStyle}>ACUERDO</label>
           <div style={contractBoxStyle}>{getContratoLegal()}</div>
           <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px', cursor: 'pointer' }}>
@@ -526,12 +710,24 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
           <div style={{ ...signatureBoxStyle, opacity: formData.aceptoTerminos ? 1 : 0.5, pointerEvents: formData.aceptoTerminos ? 'auto' : 'none' }}>
             <SignatureCanvas
               ref={sigPad}
+              onEnd={guardarFirmaActual}
               penColor="black"
               backgroundColor="white"
               clearOnResize={false}
               canvasProps={{
-                width: Math.min(window.innerWidth * 0.55, 380),
+                width: typeof window !== 'undefined' ? Math.min(window.innerWidth * 0.85, 380) : 380,
                 height: 170,
+                style: {
+                  display: 'block',
+                  width: '100%',
+                  height: '170px',
+                  touchAction: 'none',
+                  pointerEvents: 'auto',
+                  position: 'relative',
+                  zIndex: 2,
+                  backgroundColor: '#fff',
+                  cursor: 'crosshair',
+                },
               }}
             />
           </div>
@@ -543,22 +739,23 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
 
   const renderStepSuccess = () => (
     <div className="fade-in" style={{ textAlign: 'center', padding: '18px 0' }}>
-      <h2 style={{ color: '#1F2A44', fontSize: '2rem', marginBottom: '8px', marginTop: 0 }}>REGISTRO COMPLETADO</h2>
-      <h3 style={{ color: '#FF7F27', fontSize: '1.4rem', marginBottom: '18px' }}>MATRICULA: {matriculaGenerada}</h3>
+      <h2 style={{ color: 'var(--primary-color)', fontSize: '2rem', marginBottom: '8px', marginTop: 0 }}>REGISTRO COMPLETADO</h2>
+      <h3 style={{ color: 'var(--secondary-color)', fontSize: '1.4rem', marginBottom: '18px' }}>MATRICULA: {matriculaGenerada}</h3>
       <div style={warningBoxStyle}>
         El registro quedo pendiente de aprobacion. El entrenador activara tu acceso cuando apruebe y cobre tu alta.
       </div>
       {serverMessage && <p style={{ color: '#555', fontSize: '0.9rem', marginTop: '16px' }}>{serverMessage}</p>}
       <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', flexWrap: 'wrap', marginTop: '18px' }}>
         <button onClick={generarPDF} style={secondaryButtonStyle}>Descargar contrato PDF</button>
-        <button onClick={() => window.location.reload()} style={primaryButtonStyle}>Nuevo registro</button>
+        <button onClick={reiniciarFormulario} style={primaryButtonStyle}>Nuevo registro</button>
       </div>
     </div>
   );
 
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', padding: '3vh 2vw', backgroundColor: '#fafafa', minHeight: '80vh' }}>
-      <div style={containerStyle}>
+    <>
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '3vh 2vw', backgroundColor: '#fafafa', minHeight: '80vh' }}>
+        <div style={containerStyle}>
         {publicMode && (
           <div style={publicBannerStyle}>
             <div>
@@ -584,7 +781,7 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
             {formSteps.map((item, index) => {
               const num = index + 1;
               return (
-                <div key={item.id} style={{ flex: '1 1 auto', textAlign: 'center', padding: '8px', fontWeight: 700, borderBottom: step >= num ? '3px solid #FF7F27' : '3px solid #eee', color: step >= num ? '#1F2A44' : '#999', fontSize: '0.82rem' }}>
+                <div key={item.id} style={{ flex: '1 1 auto', textAlign: 'center', padding: '8px', fontWeight: 700, borderBottom: step >= num ? '3px solid var(--secondary-color)' : '3px solid #eee', color: step >= num ? 'var(--primary-color)' : '#999', fontSize: '0.82rem' }}>
                   {num}. {item.title}
                 </div>
               );
@@ -604,21 +801,74 @@ export function RegisterFighter({ gymContext = null, publicMode = false }) {
         </div>
 
         {step <= formSteps.length && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '30px', borderTop: '1px solid #eee', paddingTop: '20px', gap: '12px' }}>
-            <button onClick={prevStep} disabled={step === 1 || isSubmitting} style={{ ...secondaryButtonStyle, opacity: step === 1 || isSubmitting ? 0.6 : 1, cursor: step === 1 || isSubmitting ? 'not-allowed' : 'pointer' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '30px', borderTop: '1px solid #eee', paddingTop: '20px', gap: '12px', flexWrap: 'wrap' }}>
+            <button onClick={prevStep} disabled={step === 1 || isSubmitting} style={{ ...secondaryButtonStyle, width: 'auto', marginTop: 0, opacity: step === 1 || isSubmitting ? 0.6 : 1, cursor: step === 1 || isSubmitting ? 'not-allowed' : 'pointer' }}>
               Regresar
             </button>
             {step < formSteps.length ? (
-              <button onClick={handleNextStep} style={primaryButtonStyle}>Siguiente</button>
+              <button onClick={handleNextStep} style={{ ...primaryButtonStyle, width: 'auto' }}>Siguiente</button>
             ) : (
-              <button onClick={handleGuardarFinal} disabled={isSubmitting} style={{ ...primaryButtonStyle, opacity: isSubmitting ? 0.7 : 1 }}>
+              <button onClick={handleGuardarFinal} disabled={isSubmitting} style={{ ...primaryButtonStyle, width: 'auto', opacity: isSubmitting ? 0.7 : 1 }}>
                 {isSubmitting ? 'Guardando...' : 'Guardar'}
               </button>
             )}
           </div>
         )}
+        </div>
       </div>
-    </div>
+
+      {cameraModalOpen && (
+        <div style={cameraModalOverlayStyle} onClick={() => setCameraModalOpen(false)}>
+          <div style={cameraModalCardStyle} onClick={(event) => event.stopPropagation()}>
+            <button type="button" onClick={() => setCameraModalOpen(false)} style={cameraCloseButtonStyle}>
+              <FiX size={18} />
+            </button>
+            <div style={cameraModalHeaderStyle}>
+              <div style={cameraBadgeStyle}>Captura biometrica</div>
+              <h3 style={cameraModalTitleStyle}>Tomar Fotografia</h3>
+              <p style={cameraModalSubtitleStyle}>Acomoda el rostro dentro de la guia para una foto frontal clara.</p>
+            </div>
+
+            <div style={cameraFeedShellStyle}>
+              {capturedPreview ? (
+                <img src={capturedPreview} alt="Captura previa" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              ) : (
+                <>
+                  <Webcam
+                    audio={false}
+                    ref={webcamRef}
+                    screenshotFormat="image/jpeg"
+                    videoConstraints={{ facingMode: 'user' }}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  />
+                  <div style={faceGuideStyle} />
+                </>
+              )}
+            </div>
+
+            <div style={cameraActionsStyle}>
+              {!capturedPreview ? (
+                <button type="button" onClick={capturarFoto} style={cameraPrimaryButtonStyle}>
+                  <FiCamera size={15} />
+                  Capturar
+                </button>
+              ) : (
+                <>
+                  <button type="button" onClick={() => setCapturedPreview(null)} style={cameraGhostButtonStyle}>
+                    <FiRefreshCw size={15} />
+                    Reintentar
+                  </button>
+                  <button type="button" onClick={guardarFotoTomada} style={cameraPrimaryButtonStyle}>
+                    <FiSave size={15} />
+                    Guardar
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -626,30 +876,108 @@ const containerStyle = {
   width: 'min(95vw, 1320px)',
   backgroundColor: '#ffffff',
   borderRadius: '14px',
-  padding: 'clamp(20px, 3vw, 42px)',
+  padding: 'clamp(20px, 4vw, 42px)',
   border: '1px solid #e0e0e0',
   boxShadow: '0 8px 24px rgba(0,0,0,0.04)',
 };
 
-const gridResponsive = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(clamp(220px, 25vw, 300px), 1fr))', gap: '18px', marginBottom: '22px' };
-const stepTitleStyle = { color: '#1F2A44', borderBottom: '2px solid #FF7F27', paddingBottom: '10px', marginBottom: '18px', fontSize: '1.2rem' };
-const sectionSubtitleStyle = { color: '#1F2A44', marginBottom: '14px', fontSize: '1rem', fontWeight: 700 };
-const labelStyle = { display: 'block', fontSize: '0.78rem', fontWeight: 700, color: '#1F2A44', marginBottom: '8px', letterSpacing: '0.3px' };
+const gridResponsive = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '18px', marginBottom: '22px' };
+const stepTitleStyle = { color: 'var(--primary-color)', borderBottom: '2px solid var(--secondary-color)', paddingBottom: '10px', marginBottom: '18px', fontSize: '1.2rem' };
+const sectionSubtitleStyle = { color: 'var(--primary-color)', marginBottom: '14px', fontSize: '1rem', fontWeight: 700 };
+const labelStyle = { display: 'block', fontSize: '0.78rem', fontWeight: 700, color: 'var(--primary-color)', marginBottom: '8px', letterSpacing: '0.3px' };
 const inputStyle = { width: '100%', padding: '10px 12px', border: '1px solid #ddd', borderRadius: '6px', fontSize: '0.92rem', outline: 'none', backgroundColor: '#fafafa', boxSizing: 'border-box' };
-const primaryButtonStyle = { padding: '10px 16px', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '0.9rem', cursor: 'pointer', backgroundColor: '#1F2A44', color: '#fff' };
-const secondaryButtonStyle = { padding: '10px 14px', border: '1px solid #d0d5dd', borderRadius: '8px', fontWeight: 600, fontSize: '0.88rem', cursor: 'pointer', backgroundColor: '#fff', color: '#1F2A44', width: '100%', marginTop: '10px' };
+const primaryButtonStyle = { padding: '10px 16px', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '0.9rem', cursor: 'pointer', backgroundColor: 'var(--secondary-color)', color: '#fff' };
+const secondaryButtonStyle = { padding: '10px 14px', border: '1px solid var(--secondary-color)', borderRadius: '8px', fontWeight: 600, fontSize: '0.88rem', cursor: 'pointer', backgroundColor: '#fff', color: 'var(--primary-color)', width: '100%', marginTop: '10px' };
 const linkButtonStyle = { background: 'none', border: 'none', color: '#667085', textDecoration: 'underline', marginTop: '6px', cursor: 'pointer', fontSize: '0.76rem' };
 const cameraBoxStyle = { border: '1px solid #d0d5dd', borderRadius: '8px', overflow: 'hidden', height: 'clamp(220px, 30vh, 320px)', backgroundColor: '#000', display: 'flex', justifyContent: 'center', alignItems: 'center' };
+const photoCardStyle = { display: 'grid', gap: '12px' };
+const cameraPlaceholderStyle = { color: '#fff', display: 'grid', justifyItems: 'center', gap: '10px', fontSize: '0.86rem', textAlign: 'center', padding: '18px' };
 const contractBoxStyle = { height: '180px', overflowY: 'scroll', backgroundColor: '#f7f7f7', padding: '14px', borderRadius: '8px', fontSize: '0.76rem', color: '#333', border: '1px solid #ddd', marginBottom: '14px', whiteSpace: 'pre-wrap' };
-const signatureBoxStyle = { border: '1px dashed #c8c8c8', borderRadius: '8px', backgroundColor: '#fff', touchAction: 'none', display: 'flex', justifyContent: 'center', overflow: 'hidden' };
+const signatureBoxStyle = {
+  border: '1px dashed #c8c8c8',
+  borderRadius: '8px',
+  backgroundColor: '#fff',
+  touchAction: 'none',
+  display: 'flex',
+  justifyContent: 'center',
+  alignItems: 'center',
+  overflow: 'hidden',
+  minHeight: '170px',
+  position: 'relative',
+  zIndex: 1,
+  isolation: 'isolate',
+};
 const warningBoxStyle = { padding: '14px', backgroundColor: '#fff7ed', borderLeft: '4px solid #f59e0b', borderRadius: '6px', marginBottom: '22px', color: '#92400e', fontSize: '0.9rem' };
 const publicBannerStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap', padding: '14px 16px', marginBottom: '18px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', color: '#1e293b' };
-const gymChipStyle = { display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 10px', borderRadius: '999px', backgroundColor: '#fff', border: '1px solid #d0d5dd', fontSize: '0.8rem', fontWeight: 700, color: '#1F2A44' };
-
-const Input = ({ label, name, type = 'text', val, onChange, ph }) => (
+const gymChipStyle = { display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 10px', borderRadius: '999px', backgroundColor: '#fff', border: '1px solid var(--secondary-color)', fontSize: '0.8rem', fontWeight: 700, color: 'var(--primary-color)' };
+/* ESTILOS DEL MODAL DE CÁMARA (Sincronizados con el sistema) */
+const cameraModalOverlayStyle = { 
+  position: 'fixed', inset: 0, backgroundColor: 'rgba(15, 23, 42, 0.65)', 
+  backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)', 
+  display: 'flex', alignItems: 'center', justifyContent: 'center', 
+  padding: '20px', zIndex: 1200 
+};
+const cameraModalCardStyle = { 
+  width: 'min(92vw, 560px)', backgroundColor: '#ffffff', 
+  border: '1px solid #e2e8f0', borderRadius: '16px', 
+  padding: '32px', position: 'relative', 
+  boxShadow: '0 20px 40px rgba(0,0,0,0.1)' 
+};
+const cameraCloseButtonStyle = { 
+  position: 'absolute', top: '16px', right: '16px', 
+  width: '36px', height: '36px', borderRadius: '50%', 
+  border: 'none', background: '#f1f5f9', color: '#64748b', 
+  display: 'flex', alignItems: 'center', justifyContent: 'center', 
+  cursor: 'pointer', transition: 'background 0.2s'
+};
+const cameraModalHeaderStyle = { 
+  marginBottom: '24px', textAlign: 'center' 
+};
+const cameraBadgeStyle = { 
+  display: 'inline-flex', padding: '6px 14px', borderRadius: '999px', 
+  backgroundColor: 'var(--secondary-color)', color: '#fff', 
+  textTransform: 'uppercase', letterSpacing: '0.05em', 
+  fontSize: '0.75rem', fontWeight: 800, marginBottom: '12px' 
+};
+const cameraModalTitleStyle = { 
+  margin: '0 0 6px 0', color: 'var(--primary-color)', 
+  fontSize: '1.4rem', fontWeight: 800 
+};
+const cameraModalSubtitleStyle = { 
+  margin: 0, color: '#64748b', fontSize: '0.9rem' 
+};
+const cameraFeedShellStyle = { 
+  position: 'relative', height: 'min(50vh, 380px)', 
+  borderRadius: '12px', overflow: 'hidden', backgroundColor: '#000', 
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  border: '3px solid #f8fafc'
+};
+// MAGIA VISUAL: Ahora es un círculo perfecto para que coincida con el recorte
+const faceGuideStyle = { 
+  position: 'absolute', width: '260px', height: '260px', 
+  borderRadius: '50%', border: '3px dashed var(--secondary-color)', 
+  boxShadow: '0 0 0 9999px rgba(0,0,0,0.6)' 
+};
+const cameraActionsStyle = { 
+  display: 'flex', justifyContent: 'center', gap: '12px', 
+  marginTop: '24px', flexWrap: 'wrap' 
+};
+const cameraPrimaryButtonStyle = { 
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px', 
+  padding: '12px 24px', borderRadius: '8px', border: 'none', 
+  backgroundColor: 'var(--secondary-color)', color: '#fff', 
+  fontWeight: 700, cursor: 'pointer', fontSize: '0.95rem' 
+};
+const cameraGhostButtonStyle = { 
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px', 
+  padding: '12px 24px', borderRadius: '8px', border: '1px solid var(--secondary-color)', 
+  background: '#ffffff', color: 'var(--primary-color)', 
+  fontWeight: 700, cursor: 'pointer', fontSize: '0.95rem' 
+};
+const Input = ({ label, name, type = 'text', val, onChange, ph, ...rest }) => (
   <div style={{ width: '100%' }}>
     <label style={labelStyle}>{label}</label>
-    <input type={type} name={name} value={val} onChange={onChange} placeholder={ph} style={inputStyle} />
+    <input type={type} name={name} value={val} onChange={onChange} placeholder={ph} style={inputStyle} {...rest} />
   </div>
 );
 

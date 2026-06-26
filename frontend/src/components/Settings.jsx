@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { FiEdit2, FiImage, FiPlus, FiRefreshCw, FiSave, FiSettings, FiTrash2, FiUpload, FiUser } from 'react-icons/fi';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { FiActivity, FiAlertTriangle, FiChevronLeft, FiChevronRight, FiDownload, FiFilter, FiImage, FiRefreshCw, FiSave, FiSettings, FiUpload, FiX } from 'react-icons/fi';
 import { apiAssetUrl, fetchApi } from '../config/api';
+import { db, logLocalActivity } from '../db/db';
 import { PublicRegistrationQr } from './PublicRegistrationQr';
 
 const DEFAULT_SETTINGS = {
@@ -10,76 +11,171 @@ const DEFAULT_SETTINGS = {
   logo_path: '',
 };
 
-const EMPTY_USER_FORM = {
-  id: null,
-  nombre: '',
-  usuario: '',
-  password: '',
-  rol: 'staff',
-  telefono: '',
-  correo: '',
-  estado: 'ACTIVO',
-};
+const SPIN_STYLE = document.createElement('style');
+SPIN_STYLE.textContent = '@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }';
+if (!document.head.querySelector('style[data-spin]')) {
+  SPIN_STYLE.setAttribute('data-spin', '1');
+  document.head.appendChild(SPIN_STYLE);
+}
 
 export function Settings({ themeSettings = DEFAULT_SETTINGS, onSettingsChanged = () => {} }) {
   const [settingsForm, setSettingsForm] = useState(DEFAULT_SETTINGS);
-  const [users, setUsers] = useState([]);
-  const [usersLoading, setUsersLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
-  const [userModalOpen, setUserModalOpen] = useState(false);
-  const [userForm, setUserForm] = useState(EMPTY_USER_FORM);
+  const [bitacora, setBitacora] = useState([]);
+  const [bitacoraLoading, setBitacoraLoading] = useState(false);
+  const [bitacoraTotal, setBitacoraTotal] = useState(0);
+  const [bitacoraPage, setBitacoraPage] = useState(0);
+  const [bitacoraTablas, setBitacoraTablas] = useState([]);
+  const [bitacoraOps, setBitacoraOps] = useState([]);
+  const [bitacoraFiltros, setBitacoraFiltros] = useState({
+    tabla: '', operacion: '', fecha_desde: '', fecha_hasta: '', busqueda: '',
+  });
+  const BITACORA_PAGE_SIZE = 30;
+  const bitacoraFiltrosRef = useRef(bitacoraFiltros);
+  const bitacoraPageRef = useRef(bitacoraPage);
+  const [limpiarConfirm, setLimpiarConfirm] = useState('');
+  const [limpiarLoading, setLimpiarLoading] = useState(false);
+  const [limpiarResult, setLimpiarResult] = useState('');
 
   useEffect(() => {
+    // Si themeSettings viene del servidor usa esos valores;
+    // si el padre llegó offline y pasó DEFAULT_SETTINGS, rescata desde localStorage.
+    const cached = (() => {
+      try { return JSON.parse(localStorage.getItem('ring_manager_settings') || '{}'); } catch { return {}; }
+    })();
     setSettingsForm({
-      nombre_gym: themeSettings.nombre_gym || DEFAULT_SETTINGS.nombre_gym,
-      color_primary: themeSettings.color_primary || DEFAULT_SETTINGS.color_primary,
-      color_secondary: themeSettings.color_secondary || DEFAULT_SETTINGS.color_secondary,
-      logo_path: themeSettings.logo_path || '',
+      nombre_gym: themeSettings.nombre_gym || cached.nombre_gym || DEFAULT_SETTINGS.nombre_gym,
+      color_primary: themeSettings.color_primary || cached.color_primary || DEFAULT_SETTINGS.color_primary,
+      color_secondary: themeSettings.color_secondary || cached.color_secondary || DEFAULT_SETTINGS.color_secondary,
+      logo_path: themeSettings.logo_path || cached.logo_path || '',
     });
   }, [themeSettings]);
 
   useEffect(() => {
-    loadUsers();
+    const init = async () => {
+      try {
+        const count = await db.bitacora.count();
+        if (count === 0) {
+          await logLocalActivity('Sistema', 'Migración', 'Bitácora inicializada en modo Offline', 'Admin');
+        }
+      } catch (_) {}
+      cargarBitacora({}, 0);
+      cargarMetaBitacora();
+    };
+    init();
   }, []);
 
+  const cargarBitacora = async (filtros, page) => {
+    const f = filtros !== undefined ? filtros : bitacoraFiltrosRef.current;
+    const p = page   !== undefined ? page   : bitacoraPageRef.current;
+    bitacoraFiltrosRef.current = f;
+    bitacoraPageRef.current    = p;
+
+    setBitacoraLoading(true);
+    try {
+      let registros = await db.bitacora.orderBy('fecha').reverse().toArray();
+
+      if (f.tabla)       registros = registros.filter((r) => (r.modulo    || '') === f.tabla);
+      if (f.operacion)   registros = registros.filter((r) => (r.operacion || '') === f.operacion);
+      if (f.fecha_desde) registros = registros.filter((r) => (r.fecha     || '').slice(0, 10) >= f.fecha_desde);
+      if (f.fecha_hasta) registros = registros.filter((r) => (r.fecha     || '').slice(0, 10) <= f.fecha_hasta);
+      if (f.busqueda) {
+        const q = f.busqueda.toLowerCase();
+        registros = registros.filter((r) =>
+          (r.descripcion || '').toLowerCase().includes(q) ||
+          (r.usuario     || '').toLowerCase().includes(q) ||
+          (r.modulo      || '').toLowerCase().includes(q)
+        );
+      }
+
+      setBitacoraTotal(registros.length);
+      setBitacora(registros.slice(p * BITACORA_PAGE_SIZE, (p + 1) * BITACORA_PAGE_SIZE));
+      setBitacoraPage(p);
+      setBitacoraFiltros(f);
+    } catch (e) {
+      console.error('[Settings] Error cargando bitácora local:', e);
+    } finally {
+      setBitacoraLoading(false);
+    }
+  };
+
+  const cargarMetaBitacora = async () => {
+    try {
+      const todos = await db.bitacora.toArray();
+      setBitacoraTablas([...new Set(todos.map((r) => r.modulo).filter(Boolean))].sort());
+      setBitacoraOps([...new Set(todos.map((r) => r.operacion).filter(Boolean))].sort());
+    } catch (_) {}
+  };
+
+  const aplicarFiltro = (campo, valor) => {
+    const nuevos = { ...bitacoraFiltrosRef.current, [campo]: valor };
+    cargarBitacora(nuevos, 0);
+  };
+
+  const limpiarFiltrosBitacora = () => {
+    const vacios = { tabla: '', operacion: '', fecha_desde: '', fecha_hasta: '', busqueda: '' };
+    cargarBitacora(vacios, 0);
+  };
+
+  const exportarCSVBitacora = () => {
+    const headers = ['Fecha', 'Operacion', 'Modulo', 'Descripcion', 'Usuario'];
+    const rows    = bitacora.map((item) => [
+      item.fecha      || '',
+      item.operacion  || '',
+      item.modulo     || '',
+      (item.descripcion || '').replace(/,/g, ';'),
+      item.usuario    || 'Sistema',
+    ]);
+    const csv  = [headers, ...rows].map((r) => r.join(',')).join('\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `bitacora_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleLimpiarDatos = async () => {
+    if (limpiarConfirm.trim().toUpperCase() !== 'LIMPIAR DATOS') {
+      alert('Escribe exactamente LIMPIAR DATOS para confirmar.');
+      return;
+    }
+    setLimpiarLoading(true);
+    setLimpiarResult('');
+    try {
+      const res = await fetchApi('/api/admin/limpiar-datos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmacion: 'LIMPIAR DATOS' }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setLimpiarResult(`Base de datos limpiada. Tablas borradas: ${(result.tablas_borradas || []).length}`);
+        setLimpiarConfirm('');
+      } else {
+        setLimpiarResult(`Error: ${result.message || 'No se pudo limpiar.'}`);
+      }
+    } catch (e) {
+      setLimpiarResult(`Error de conexión: ${e.message}`);
+    } finally {
+      setLimpiarLoading(false);
+    }
+  };
+
   const logoPreviewUrl = useMemo(() => {
-    if (!settingsForm.logo_path) {
-      return '';
-    }
-
-    if (settingsForm.logo_path.startsWith('http')) {
-      return settingsForm.logo_path;
-    }
-
+    if (!settingsForm.logo_path) return '';
+    // data URLs del fallback offline — usar directamente
+    if (settingsForm.logo_path.startsWith('data:')) return settingsForm.logo_path;
+    if (settingsForm.logo_path.startsWith('http')) return settingsForm.logo_path;
     const normalizedPath = settingsForm.logo_path.startsWith('/')
       ? settingsForm.logo_path
       : `/${settingsForm.logo_path}`;
-
     return apiAssetUrl(normalizedPath);
   }, [settingsForm.logo_path]);
-
-  const loadUsers = async () => {
-    setUsersLoading(true);
-    setErrorMessage('');
-    try {
-      const response = await fetchApi('/api/usuarios');
-      const result = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(result.message || 'No pude obtener los usuarios.');
-      }
-
-      setUsers(Array.isArray(result.data) ? result.data : []);
-    } catch (error) {
-      console.error('No pude cargar usuarios:', error);
-      setErrorMessage(error.message || 'No pude cargar los usuarios.');
-    } finally {
-      setUsersLoading(false);
-    }
-  };
 
   const saveSettingValue = async (clave, valor) => {
     const response = await fetchApi(`/api/settings/${encodeURIComponent(clave)}`, {
@@ -99,15 +195,38 @@ export function Settings({ themeSettings = DEFAULT_SETTINGS, onSettingsChanged =
     setFeedbackMessage('');
     setErrorMessage('');
 
+    const toSave = {
+      nombre_gym: settingsForm.nombre_gym.trim(),
+      color_primary: settingsForm.color_primary.trim(),
+      color_secondary: settingsForm.color_secondary.trim(),
+    };
+
+    const persistLocal = () => {
+      try {
+        const prev = JSON.parse(localStorage.getItem('ring_manager_settings') || '{}');
+        localStorage.setItem('ring_manager_settings', JSON.stringify({ ...prev, ...toSave }));
+      } catch {}
+    };
+
     try {
-      await saveSettingValue('nombre_gym', settingsForm.nombre_gym.trim());
-      await saveSettingValue('color_primary', settingsForm.color_primary.trim());
-      await saveSettingValue('color_secondary', settingsForm.color_secondary.trim());
+      await saveSettingValue('nombre_gym', toSave.nombre_gym);
+      await saveSettingValue('color_primary', toSave.color_primary);
+      await saveSettingValue('color_secondary', toSave.color_secondary);
+      persistLocal();
       await onSettingsChanged();
-      setFeedbackMessage('Configuracion actualizada correctamente.');
+      logLocalActivity('Ajustes', 'Configuración', `Ajustes guardados: gym="${toSave.nombre_gym}"`, 'Admin').catch(() => {});
+      setFeedbackMessage('Configuración actualizada correctamente.');
     } catch (error) {
-      console.error('No pude guardar settings:', error);
-      setErrorMessage(error.message || 'No pude guardar la configuracion.');
+      const isNetworkError = error instanceof TypeError || error.name === 'AbortError';
+      if (isNetworkError) {
+        persistLocal();
+        logLocalActivity('Ajustes', 'Configuración', `Ajustes guardados offline: gym="${toSave.nombre_gym}"`, 'Admin').catch(() => {});
+        setFeedbackMessage('Ajuste guardado localmente. Se sincronizará cuando haya conexión.');
+        await onSettingsChanged().catch(() => {});
+      } else {
+        console.error('No pude guardar settings:', error);
+        setErrorMessage(error.message || 'No pude guardar la configuración.');
+      }
     } finally {
       setSettingsSaving(false);
     }
@@ -115,129 +234,64 @@ export function Settings({ themeSettings = DEFAULT_SETTINGS, onSettingsChanged =
 
   const handleLogoSelected = async (event) => {
     const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
+    if (!file) return;
 
     setUploadingLogo(true);
     setFeedbackMessage('');
     setErrorMessage('');
 
+    let dataUrl;
     try {
-      const dataUrl = await fileToDataUrl(file);
+      dataUrl = await fileToDataUrl(file);
+    } catch {
+      setErrorMessage('No se pudo leer el archivo.');
+      event.target.value = '';
+      setUploadingLogo(false);
+      return;
+    }
+
+    try {
       const response = await fetchApi('/api/settings/logo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ logo_data_url: dataUrl }),
       });
       const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.message || 'No pude subir el logo.');
 
-      if (!response.ok) {
-        throw new Error(result.message || 'No pude subir el logo.');
-      }
-
+      const newLogoPath = result.data?.logo_path || '';
       setSettingsForm((prev) => ({
         ...prev,
-        logo_path: result.data?.logo_path || prev.logo_path,
+        logo_path: newLogoPath,
         color_primary: result.data?.color_primary || prev.color_primary,
         color_secondary: result.data?.color_secondary || prev.color_secondary,
       }));
+      try {
+        const prev = JSON.parse(localStorage.getItem('ring_manager_settings') || '{}');
+        localStorage.setItem('ring_manager_settings', JSON.stringify({ ...prev, logo_path: newLogoPath }));
+      } catch {}
+      logLocalActivity('Ajustes', 'Logo', 'Logo subido y procesado correctamente.', 'Admin').catch(() => {});
       await onSettingsChanged();
       setFeedbackMessage('Logo procesado correctamente.');
     } catch (error) {
-      console.error('No pude subir el logo:', error);
-      setErrorMessage(error.message || 'No pude subir el logo.');
+      const isNetworkError = error instanceof TypeError || error.name === 'AbortError';
+      if (isNetworkError) {
+        // Aplicar el logo como data URL directamente — visible en esta sesión.
+        setSettingsForm((prev) => ({ ...prev, logo_path: dataUrl }));
+        try {
+          const prev = JSON.parse(localStorage.getItem('ring_manager_settings') || '{}');
+          localStorage.setItem('ring_manager_settings', JSON.stringify({ ...prev, logo_path: dataUrl }));
+        } catch {}
+        logLocalActivity('Ajustes', 'Logo', 'Logo guardado offline como data URL.', 'Admin').catch(() => {});
+        setFeedbackMessage('Logo guardado localmente. Se subirá al servidor cuando haya conexión.');
+        await onSettingsChanged().catch(() => {});
+      } else {
+        console.error('No pude subir el logo:', error);
+        setErrorMessage(error.message || 'No pude subir el logo.');
+      }
     } finally {
       event.target.value = '';
       setUploadingLogo(false);
-    }
-  };
-
-  const openCreateUserModal = () => {
-    setUserForm(EMPTY_USER_FORM);
-    setUserModalOpen(true);
-  };
-
-  const openEditUserModal = (user) => {
-    setUserForm({
-      id: user.id,
-      nombre: user.nombre || '',
-      usuario: user.usuario || '',
-      password: '',
-      rol: user.rol || 'staff',
-      telefono: user.telefono || '',
-      correo: user.correo || '',
-      estado: user.estado || 'ACTIVO',
-    });
-    setUserModalOpen(true);
-  };
-
-  const handleSaveUser = async () => {
-    if (!userForm.nombre.trim() || !userForm.usuario.trim()) {
-      alert('Nombre y usuario son obligatorios.');
-      return;
-    }
-    if (!userForm.id && !userForm.password.trim()) {
-      alert('La password es obligatoria para crear el usuario.');
-      return;
-    }
-
-    try {
-      const payload = {
-        nombre: userForm.nombre.trim(),
-        usuario: userForm.usuario.trim(),
-        password: userForm.password.trim(),
-        rol: userForm.rol,
-        telefono: userForm.telefono.trim(),
-        correo: userForm.correo.trim(),
-        estado: userForm.estado,
-      };
-
-      const response = await fetchApi(
-        userForm.id ? `/api/usuarios/${userForm.id}` : '/api/usuarios',
-        {
-          method: userForm.id ? 'PUT' : 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-      );
-      const result = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(result.message || 'No pude guardar el usuario.');
-      }
-
-      setUserModalOpen(false);
-      setUserForm(EMPTY_USER_FORM);
-      await loadUsers();
-      setFeedbackMessage(userForm.id ? 'Usuario actualizado correctamente.' : 'Usuario creado correctamente.');
-    } catch (error) {
-      console.error('No pude guardar usuario:', error);
-      alert(error.message || 'No pude guardar el usuario.');
-    }
-  };
-
-  const handleDeleteUser = async (user) => {
-    const confirmation = window.confirm(`Eliminar a ${user.nombre}?`);
-    if (!confirmation) {
-      return;
-    }
-
-    try {
-      const response = await fetchApi(`/api/usuarios/${user.id}`, {
-        method: 'DELETE',
-      });
-      const result = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(result.message || 'No pude eliminar el usuario.');
-      }
-
-      await loadUsers();
-      setFeedbackMessage('Usuario eliminado correctamente.');
-    } catch (error) {
-      console.error('No pude eliminar usuario:', error);
-      alert(error.message || 'No pude eliminar el usuario.');
     }
   };
 
@@ -250,7 +304,7 @@ export function Settings({ themeSettings = DEFAULT_SETTINGS, onSettingsChanged =
               <FiSettings size={22} style={{ color: 'var(--secondary-color)' }} />
               Ajustes del Sistema
             </h1>
-            <p style={subtitleStyle}>Gestiona branding, usuarios y configuracion general sin salir del panel.</p>
+            <p style={subtitleStyle}>Gestiona branding, logo y configuracion general del gimnasio.</p>
           </div>
           <button onClick={onSettingsChanged} style={ghostButtonStyle}>
             <FiRefreshCw size={14} />
@@ -333,147 +387,227 @@ export function Settings({ themeSettings = DEFAULT_SETTINGS, onSettingsChanged =
           </div>
         </SectionCard>
 
-        <SectionCard title="Usuarios" icon={<FiUser size={18} />}>
-          <div style={sectionActionsStyle}>
-            <p style={sectionDescriptionStyle}>Administra usuarios de `usuarios` con roles `admin` y `staff`.</p>
-            <button onClick={openCreateUserModal} style={primaryButtonStyle}>
-              <FiPlus size={14} />
-              Nuevo usuario
-            </button>
-          </div>
-
-          {usersLoading ? (
-            <p style={helperTextStyle}>Cargando usuarios...</p>
-          ) : (
-            <div style={{ display: 'grid', gap: '10px' }}>
-              {users.map((user) => (
-                <div key={user.id} style={userRowStyle}>
-                  <div>
-                    <div style={{ fontWeight: 700, color: '#1e293b' }}>{user.nombre}</div>
-                    <div style={{ fontSize: '0.8rem', color: '#667085' }}>
-                      @{user.usuario} · {user.rol} · {user.estado}
-                    </div>
-                    <div style={{ fontSize: '0.78rem', color: '#667085' }}>
-                      {user.correo || 'Sin correo'} {user.telefono ? `· ${user.telefono}` : ''}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button onClick={() => openEditUserModal(user)} style={iconButtonStyle}>
-                      <FiEdit2 size={14} />
-                    </button>
-                    <button onClick={() => handleDeleteUser(user)} style={{ ...iconButtonStyle, color: '#b42318' }}>
-                      <FiTrash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {!users.length && <p style={helperTextStyle}>No hay usuarios registrados.</p>}
-            </div>
-          )}
-        </SectionCard>
-
         <SectionCard title="Configuracion" icon={<FiSettings size={18} />}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px' }}>
             <div style={configInfoBoxStyle}>
               <strong style={{ display: 'block', marginBottom: '6px', color: '#1e293b' }}>Tema activo</strong>
               <span style={{ color: '#667085', fontSize: '0.84rem' }}>
-                Los colores guardados se aplican automaticamente en la app al iniciar.
+                Los colores guardados se aplican automaticamente en toda la app en tiempo real.
               </span>
             </div>
             <div style={configInfoBoxStyle}>
-              <strong style={{ display: 'block', marginBottom: '6px', color: '#1e293b' }}>Logo y colores</strong>
+              <strong style={{ display: 'block', marginBottom: '6px', color: '#1e293b' }}>Gestion de personal</strong>
               <span style={{ color: '#667085', fontSize: '0.84rem' }}>
-                Si no hay logo, el sistema conserva colores por default para no romper la interfaz.
+                La creacion y edicion de empleados vive exclusivamente en el modulo Equipo.
               </span>
             </div>
           </div>
         </SectionCard>
 
         <PublicRegistrationQr />
-      </div>
 
-      {userModalOpen && (
-        <div style={modalOverlayStyle}>
-          <div style={modalCardStyle}>
-            <h3 style={{ margin: '0 0 14px 0', color: '#1e293b' }}>{userForm.id ? 'Editar usuario' : 'Nuevo usuario'}</h3>
+        {/* BITÁCORA DE ACTIVIDAD */}
+        <SectionCard title="Bitácora de actividad" icon={<FiActivity size={18} />}>
 
-            <label style={labelStyle}>Nombre</label>
-            <input
-              type="text"
-              value={userForm.nombre}
-              onChange={(event) => setUserForm((prev) => ({ ...prev, nombre: event.target.value }))}
-              style={inputStyle}
-            />
-
-            <label style={labelStyle}>Usuario</label>
-            <input
-              type="text"
-              value={userForm.usuario}
-              onChange={(event) => setUserForm((prev) => ({ ...prev, usuario: event.target.value }))}
-              style={inputStyle}
-            />
-
-            <label style={labelStyle}>{userForm.id ? 'Nueva password' : 'Password'}</label>
-            <input
-              type="password"
-              value={userForm.password}
-              onChange={(event) => setUserForm((prev) => ({ ...prev, password: event.target.value }))}
-              style={inputStyle}
-              placeholder={userForm.id ? 'Dejar vacia para conservarla' : ''}
-            />
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              <div>
-                <label style={labelStyle}>Rol</label>
-                <select
-                  value={userForm.rol}
-                  onChange={(event) => setUserForm((prev) => ({ ...prev, rol: event.target.value }))}
-                  style={inputStyle}
-                >
-                  <option value="admin">admin</option>
-                  <option value="staff">staff</option>
-                </select>
-              </div>
-              <div>
-                <label style={labelStyle}>Estado</label>
-                <select
-                  value={userForm.estado}
-                  onChange={(event) => setUserForm((prev) => ({ ...prev, estado: event.target.value }))}
-                  style={inputStyle}
-                >
-                  <option value="ACTIVO">ACTIVO</option>
-                  <option value="INACTIVO">INACTIVO</option>
-                </select>
-              </div>
+          {/* ── Barra de filtros ── */}
+          <div style={bFiltrosWrapStyle}>
+            {/* Búsqueda libre */}
+            <div style={bSearchBoxStyle}>
+              <FiFilter size={13} style={{ color: '#94a3b8', flexShrink: 0 }} />
+              <input
+                type="text"
+                placeholder="Buscar descripción, usuario…"
+                value={bitacoraFiltros.busqueda}
+                onChange={(e) => aplicarFiltro('busqueda', e.target.value)}
+                style={bSearchInputStyle}
+              />
+              {bitacoraFiltros.busqueda && (
+                <button onClick={() => aplicarFiltro('busqueda', '')} style={bClearMiniBtn}>
+                  <FiX size={12} />
+                </button>
+              )}
             </div>
 
-            <label style={labelStyle}>Telefono</label>
+            {/* Módulo */}
+            <select
+              value={bitacoraFiltros.tabla}
+              onChange={(e) => aplicarFiltro('tabla', e.target.value)}
+              style={bSelectStyle}
+            >
+              <option value="">Todos los módulos</option>
+              {bitacoraTablas.map((t) => (
+                <option key={t} value={t}>{TABLA_LABELS[t] || t}</option>
+              ))}
+            </select>
+
+            {/* Operación */}
+            <select
+              value={bitacoraFiltros.operacion}
+              onChange={(e) => aplicarFiltro('operacion', e.target.value)}
+              style={bSelectStyle}
+            >
+              <option value="">Todas las operaciones</option>
+              {bitacoraOps.map((o) => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+
+            {/* Fechas */}
             <input
-              type="text"
-              value={userForm.telefono}
-              onChange={(event) => setUserForm((prev) => ({ ...prev, telefono: event.target.value }))}
-              style={inputStyle}
+              type="date"
+              value={bitacoraFiltros.fecha_desde}
+              onChange={(e) => aplicarFiltro('fecha_desde', e.target.value)}
+              style={{ ...bSelectStyle, color: bitacoraFiltros.fecha_desde ? '#1e293b' : '#94a3b8' }}
+              title="Desde"
+            />
+            <input
+              type="date"
+              value={bitacoraFiltros.fecha_hasta}
+              onChange={(e) => aplicarFiltro('fecha_hasta', e.target.value)}
+              style={{ ...bSelectStyle, color: bitacoraFiltros.fecha_hasta ? '#1e293b' : '#94a3b8' }}
+              title="Hasta"
             />
 
-            <label style={labelStyle}>Correo</label>
-            <input
-              type="email"
-              value={userForm.correo}
-              onChange={(event) => setUserForm((prev) => ({ ...prev, correo: event.target.value }))}
-              style={inputStyle}
-            />
-
-            <div style={{ display: 'flex', gap: '10px', marginTop: '18px' }}>
-              <button onClick={() => setUserModalOpen(false)} style={ghostButtonStyle}>
-                Cancelar
+            {/* Acciones */}
+            <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
+              {(bitacoraFiltros.tabla || bitacoraFiltros.operacion || bitacoraFiltros.fecha_desde || bitacoraFiltros.fecha_hasta || bitacoraFiltros.busqueda) && (
+                <button onClick={limpiarFiltrosBitacora} style={bGhostSmallBtn} title="Limpiar filtros">
+                  <FiX size={13} /> Limpiar
+                </button>
+              )}
+              <button onClick={exportarCSVBitacora} style={bGhostSmallBtn} disabled={bitacora.length === 0} title="Exportar CSV">
+                <FiDownload size={13} /> CSV
               </button>
-              <button onClick={handleSaveUser} style={primaryButtonStyle}>
-                Guardar usuario
+              <button onClick={() => cargarBitacora()} style={bGhostSmallBtn} disabled={bitacoraLoading} title="Recargar">
+                <FiRefreshCw size={13} style={{ animation: bitacoraLoading ? 'spin 1s linear infinite' : 'none' }} />
+                {bitacoraLoading ? 'Cargando…' : 'Recargar'}
               </button>
             </div>
           </div>
-        </div>
-      )}
+
+          {/* ── Contador ── */}
+          <div style={{ fontSize: '0.76rem', color: '#94a3b8', marginBottom: '10px' }}>
+            {bitacoraLoading
+              ? 'Consultando…'
+              : `${bitacoraTotal.toLocaleString('es-MX')} registro${bitacoraTotal !== 1 ? 's' : ''} en total`}
+          </div>
+
+          {/* ── Tabla ── */}
+          <div style={{ overflowX: 'auto', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
+            <table style={bTableStyle}>
+              <thead>
+                <tr style={{ backgroundColor: '#f8fafc' }}>
+                  <th style={bThStyle}>Fecha</th>
+                  <th style={bThStyle}>Operación</th>
+                  <th style={bThStyle}>Módulo</th>
+                  <th style={{ ...bThStyle, flex: 2 }}>Descripción</th>
+                  <th style={bThStyle}>Usuario</th>
+                  <th style={bThStyle}>IP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!bitacoraLoading && bitacora.length === 0 && (
+                  <tr>
+                    <td colSpan={6} style={{ padding: '32px', textAlign: 'center', color: '#94a3b8', fontSize: '0.86rem' }}>
+                      Sin registros para los filtros seleccionados.
+                    </td>
+                  </tr>
+                )}
+                {bitacora.map((item, idx) => (
+                  <tr
+                    key={item.id}
+                    style={{ backgroundColor: idx % 2 === 0 ? '#fff' : '#fafafa', borderBottom: '1px solid #f1f5f9' }}
+                  >
+                    <td style={{ ...bTdStyle, color: '#64748b', whiteSpace: 'nowrap', fontSize: '0.75rem' }}>
+                      {item.fecha
+                        ? new Date(item.fecha).toLocaleString('es-MX', {
+                            day: '2-digit', month: '2-digit', year: '2-digit',
+                            hour: '2-digit', minute: '2-digit',
+                          })
+                        : '—'}
+                    </td>
+                    <td style={bTdStyle}>
+                      <span style={bitacoraOpBadge(item.operacion)}>{item.operacion || '—'}</span>
+                    </td>
+                    <td style={{ ...bTdStyle, color: '#475569', fontSize: '0.78rem' }}>
+                      {TABLA_LABELS[item.modulo] || item.modulo || '—'}
+                    </td>
+                    <td style={{ ...bTdStyle, maxWidth: '320px' }}>
+                      <span style={{ fontSize: '0.82rem', color: '#1e293b', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                        title={item.descripcion || ''}>
+                        {item.descripcion || '—'}
+                      </span>
+                    </td>
+                    <td style={{ ...bTdStyle, fontSize: '0.78rem', color: '#475569', whiteSpace: 'nowrap' }}>
+                      {item.usuario && item.usuario !== 'Sistema'
+                        ? <strong>{item.usuario}</strong>
+                        : <span style={{ color: '#94a3b8' }}>Sistema</span>}
+                    </td>
+                    <td style={{ ...bTdStyle, fontSize: '0.75rem', color: '#94a3b8', whiteSpace: 'nowrap' }}>
+                      —
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* ── Paginación ── */}
+          {bitacoraTotal > BITACORA_PAGE_SIZE && (
+            <div style={bPaginacionStyle}>
+              <button
+                onClick={() => cargarBitacora(undefined, bitacoraPage - 1)}
+                disabled={bitacoraPage === 0 || bitacoraLoading}
+                style={bPageBtnStyle(bitacoraPage === 0)}
+              >
+                <FiChevronLeft size={15} /> Anterior
+              </button>
+              <span style={{ fontSize: '0.82rem', color: '#475569' }}>
+                Página {bitacoraPage + 1} de {Math.ceil(bitacoraTotal / BITACORA_PAGE_SIZE)}
+              </span>
+              <button
+                onClick={() => cargarBitacora(undefined, bitacoraPage + 1)}
+                disabled={(bitacoraPage + 1) * BITACORA_PAGE_SIZE >= bitacoraTotal || bitacoraLoading}
+                style={bPageBtnStyle((bitacoraPage + 1) * BITACORA_PAGE_SIZE >= bitacoraTotal)}
+              >
+                Siguiente <FiChevronRight size={15} />
+              </button>
+            </div>
+          )}
+        </SectionCard>
+
+        {/* ZONA DE PELIGRO */}
+        <section style={{ ...cardStyle, border: '1px solid #fecaca', backgroundColor: '#fff5f5' }}>
+          <div style={sectionTitleStyle}>
+            <span style={{ color: '#b42318', display: 'inline-flex' }}><FiAlertTriangle size={18} /></span>
+            <h2 style={{ margin: 0, fontSize: '1.02rem', color: '#b42318' }}>Zona de peligro</h2>
+          </div>
+          <p style={{ margin: '0 0 14px 0', fontSize: '0.86rem', color: '#6b7280', lineHeight: 1.5 }}>
+            Borra todos los peleadores, pagos, asistencias, ventas y productos. Conserva usuarios, membresías, ajustes y configuración del gimnasio. <strong>Esta acción es irreversible.</strong>
+          </p>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              placeholder='Escribe: LIMPIAR DATOS'
+              value={limpiarConfirm}
+              onChange={(e) => setLimpiarConfirm(e.target.value)}
+              style={{ ...inputStyle, maxWidth: '240px', borderColor: '#fecaca' }}
+            />
+            <button
+              onClick={handleLimpiarDatos}
+              disabled={limpiarLoading}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '9px 14px', borderRadius: '8px', border: 'none', backgroundColor: limpiarLoading ? '#94a3b8' : '#b42318', color: '#fff', cursor: limpiarLoading ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '0.84rem' }}
+            >
+              {limpiarLoading ? 'Limpiando...' : 'Limpiar base de datos'}
+            </button>
+          </div>
+          {limpiarResult && (
+            <p style={{ marginTop: '10px', fontSize: '0.84rem', color: limpiarResult.startsWith('Error') ? '#b42318' : '#166534' }}>
+              {limpiarResult}
+            </p>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
@@ -642,38 +776,6 @@ const inputStyle = {
   outline: 'none',
 };
 
-const sectionActionsStyle = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  gap: '12px',
-  flexWrap: 'wrap',
-  marginBottom: '14px',
-};
-
-const sectionDescriptionStyle = {
-  margin: 0,
-  color: '#667085',
-  fontSize: '0.85rem',
-};
-
-const userRowStyle = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  gap: '12px',
-  padding: '14px',
-  borderRadius: '10px',
-  border: '1px solid #e2e8f0',
-  backgroundColor: '#fcfcfd',
-};
-
-const helperTextStyle = {
-  color: '#667085',
-  fontSize: '0.86rem',
-  margin: 0,
-};
-
 const configInfoBoxStyle = {
   border: '1px solid #e2e8f0',
   borderRadius: '12px',
@@ -747,36 +849,155 @@ const ghostButtonStyle = {
   fontSize: '0.84rem',
 };
 
-const iconButtonStyle = {
-  width: '34px',
-  height: '34px',
-  display: 'inline-flex',
+/* ── Bitácora: colores por operación ── */
+const OP_COLORS = {
+  LOGIN:          '#2563eb',
+  LOGOUT:         '#7c3aed',
+  CHECKIN:        '#0891b2',
+  PAGO:           '#b45309',
+  VENTA:          '#166534',
+  APERTURA_CAJA:  '#0369a1',
+  CIERRE_CAJA:    '#1e40af',
+  CREATE:         '#047857',
+  UPDATE:         '#1d4ed8',
+  DELETE:         '#b42318',
+  BAJA:           '#b42318',
+  APROBADO:       '#166534',
+};
+
+const TABLA_LABELS = {
+  usuarios:       'Usuarios',
+  peleadores:     'Alumnos',
+  asistencias:    'Asistencias',
+  pagos:          'Pagos',
+  ventas_tienda:  'Tienda',
+  cortes_caja:    'Caja',
+  productos:      'Productos',
+  settings:       'Configuración',
+};
+
+const bitacoraOpBadge = (op = '') => ({
+  display: 'inline-block',
+  padding: '2px 8px',
+  borderRadius: '999px',
+  fontSize: '0.68rem',
+  fontWeight: 800,
+  letterSpacing: '0.4px',
+  whiteSpace: 'nowrap',
+  backgroundColor: `${OP_COLORS[op] || '#475569'}18`,
+  color: OP_COLORS[op] || '#475569',
+});
+
+/* Filtros */
+const bFiltrosWrapStyle = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: '8px',
   alignItems: 'center',
-  justifyContent: 'center',
+  marginBottom: '12px',
+};
+
+const bSearchBoxStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
+  border: '1px solid #d0d5dd',
+  borderRadius: '8px',
+  padding: '6px 10px',
+  backgroundColor: '#fff',
+  flex: '1 1 200px',
+  minWidth: '160px',
+};
+
+const bSearchInputStyle = {
+  border: 'none',
+  outline: 'none',
+  fontSize: '0.82rem',
+  color: '#1e293b',
+  backgroundColor: 'transparent',
+  width: '100%',
+};
+
+const bSelectStyle = {
+  padding: '7px 10px',
   borderRadius: '8px',
   border: '1px solid #d0d5dd',
   backgroundColor: '#fff',
+  fontSize: '0.82rem',
   color: '#1e293b',
+  outline: 'none',
   cursor: 'pointer',
+  flex: '0 1 auto',
 };
 
-const modalOverlayStyle = {
-  position: 'fixed',
-  inset: 0,
-  backgroundColor: 'rgba(15, 23, 42, 0.45)',
+const bClearMiniBtn = {
+  background: 'none',
+  border: 'none',
+  cursor: 'pointer',
+  color: '#94a3b8',
+  padding: '0',
   display: 'flex',
   alignItems: 'center',
-  justifyContent: 'center',
-  padding: '16px',
-  zIndex: 1000,
 };
 
-const modalCardStyle = {
-  width: '100%',
-  maxWidth: '420px',
+const bGhostSmallBtn = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '5px',
+  padding: '6px 11px',
+  borderRadius: '8px',
+  border: '1px solid #d0d5dd',
   backgroundColor: '#fff',
-  borderRadius: '14px',
-  border: '1px solid #e2e8f0',
-  boxShadow: '0 18px 36px rgba(15, 23, 42, 0.16)',
-  padding: '20px',
+  color: '#344054',
+  cursor: 'pointer',
+  fontWeight: 600,
+  fontSize: '0.78rem',
+  whiteSpace: 'nowrap',
 };
+
+/* Tabla */
+const bTableStyle = {
+  width: '100%',
+  borderCollapse: 'collapse',
+  fontSize: '0.83rem',
+};
+
+const bThStyle = {
+  padding: '10px 12px',
+  textAlign: 'left',
+  fontSize: '0.72rem',
+  fontWeight: 700,
+  color: '#64748b',
+  letterSpacing: '0.5px',
+  textTransform: 'uppercase',
+  borderBottom: '1px solid #e2e8f0',
+  whiteSpace: 'nowrap',
+};
+
+const bTdStyle = {
+  padding: '9px 12px',
+  verticalAlign: 'middle',
+};
+
+/* Paginación */
+const bPaginacionStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  marginTop: '14px',
+  gap: '10px',
+};
+
+const bPageBtnStyle = (disabled) => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '5px',
+  padding: '7px 13px',
+  borderRadius: '8px',
+  border: '1px solid #d0d5dd',
+  backgroundColor: disabled ? '#f8fafc' : '#fff',
+  color: disabled ? '#cbd5e1' : '#344054',
+  cursor: disabled ? 'not-allowed' : 'pointer',
+  fontWeight: 600,
+  fontSize: '0.82rem',
+});
